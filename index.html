@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OBJ Preview</title>
+
+<!-- Three.js is loaded from a CDN at runtime via an import map.
+     Swap these for local/bundled copies if you need to run offline. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<style>
+  :root {
+    --bg:        #0d0f12;
+    --surface:   #16191e;
+    --surface-2: #1c2027;
+    --line:      #2a2f38;
+    --text:      #e6e9ee;
+    --muted:     #808a98;
+    --accent:    #ffc24b;   /* signal amber — the one loud thing */
+    --accent-dim:#5a4a24;
+    --danger:    #ff6b6b;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: var(--sans);
+    color: var(--text);
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  /* ---- Control rail -------------------------------------------------------- */
+  #rail {
+    position: fixed;
+    inset: 0 0 auto 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 14px;
+    background: linear-gradient(180deg, rgba(22,25,30,.96), rgba(22,25,30,.82));
+    border-bottom: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+  }
+
+  .brand {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .brand b { color: var(--accent); font-weight: 600; }
+
+  .rail-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .divider { width: 1px; height: 24px; background: var(--line); }
+
+  input[type="url"] {
+    width: min(42vw, 460px);
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 11px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input[type="url"]::placeholder { color: #59616e; }
+  input[type="url"]:focus { border-color: var(--accent); }
+
+  button, .filelabel {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color .15s, background .15s;
+  }
+  button:hover, .filelabel:hover { border-color: var(--accent); }
+  button:focus-visible, .filelabel:focus-within,
+  input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; }
+  .primary:hover { background: #ffce6d; }
+
+  #file { display: none; }
+
+  /* ---- Viewport ------------------------------------------------------------ */
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  /* ---- Telemetry HUD (the signature element) ------------------------------- */
+  #hud {
+    position: fixed;
+    left: 14px;
+    bottom: 14px;
+    z-index: 8;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--muted);
+    background: rgba(13,15,18,.55);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 13px;
+    min-width: 190px;
+    backdrop-filter: blur(6px);
+    pointer-events: none;
+    user-select: none;
+  }
+  #hud .row { display: flex; justify-content: space-between; gap: 18px; }
+  #hud .k { color: #5f6875; }
+  #hud .v { color: var(--text); }
+  #hud .name { color: var(--accent); }
+  #hud .sep { height: 1px; background: var(--line); margin: 6px 0; }
+
+  /* ---- Help legend --------------------------------------------------------- */
+  #legend {
+    position: fixed;
+    right: 14px;
+    bottom: 14px;
+    z-index: 8;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-align: right;
+    line-height: 1.9;
+    pointer-events: none;
+    user-select: none;
+  }
+  #legend kbd {
+    font: inherit;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  /* ---- Status toast -------------------------------------------------------- */
+  #status {
+    position: fixed;
+    top: 62px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 9;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 8px 15px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    opacity: 0;
+    transition: opacity .2s;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #status.show { opacity: 1; }
+  #status.error { border-color: var(--danger); color: var(--danger); }
+  #status.busy  { border-color: var(--accent); color: var(--accent); }
+
+  /* ---- Drop overlay -------------------------------------------------------- */
+  #drop {
+    position: fixed; inset: 0; z-index: 20;
+    display: none;
+    align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 15px; letter-spacing: .05em;
+    color: var(--accent);
+    background: rgba(13,15,18,.82);
+    border: 2px dashed var(--accent);
+  }
+  #drop.show { display: flex; }
+
+  @media (max-width: 720px) {
+    input[type="url"] { width: 40vw; }
+    .brand { display: none; }
+    #legend { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="rail">
+    <span class="brand">OBJ&nbsp;<b>PREVIEW</b></span>
+
+    <div class="rail-group">
+      <input id="url" type="url" inputmode="url"
+             placeholder="https://example.com/model.obj" />
+      <button id="loadUrl" class="primary">Load URL</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="rail-group">
+      <label class="filelabel" tabindex="0">
+        Open .obj file
+        <input id="file" type="file" accept=".obj,model/obj,text/plain" />
+      </label>
+      <button id="reset" title="Recenter the model">Recenter</button>
+    </div>
+  </div>
+
+  <div id="stage"></div>
+
+  <div id="hud">
+    <div class="row"><span class="name" id="hud-name">no model loaded</span></div>
+    <div class="row"><span class="k">tris</span><span class="v" id="hud-tris">—</span></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">rot</span><span class="v" id="hud-rot">0°, 0°, 0°</span></div>
+    <div class="row"><span class="k">pos</span><span class="v" id="hud-pos">0.00, 0.00</span></div>
+    <div class="row"><span class="k">zoom</span><span class="v" id="hud-zoom">1.00×</span></div>
+  </div>
+
+  <div id="legend">
+    <div><kbd>drag</kbd> rotate</div>
+    <div><kbd>ctrl</kbd>+<kbd>drag</kbd> · <kbd>↑↓←→</kbd> move</div>
+    <div><kbd>scroll</kbd> zoom · <kbd>R</kbd> recenter · <kbd>G</kbd> grid</div>
+  </div>
+
+  <div id="status"></div>
+  <div id="drop">drop .obj to load</div>
+
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>
