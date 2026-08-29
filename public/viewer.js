@@ -15,7 +15,7 @@ const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
 camera.position.set(0, 0, 5);
 camera.lookAt(0, 0, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
@@ -46,8 +46,19 @@ const defaultMaterial = new THREE.MeshStandardMaterial({
 });
 
 let currentModel = null;   // the centered/scaled group inside the pivot
+let currentName = 'model'; // basename of the loaded model, for the gif filename
 let baseDistance = 5;      // camera Z that framed the model at zoom = 1
 let activeBlobUrls = [];   // object URLs for uploaded textures, revoked on reload
+
+// Turntable / GIF settings, driven by the tuning panel.
+const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480 };
+let spinning = false;      // live preview spin
+let capturing = false;     // GIF capture in progress
+let phase = 0;             // 0..1 position within the current rotation
+let lastFrameT = performance.now();
+
+// Native timers captured up front, in case the capture library virtualises them.
+const nativeRAF = window.requestAnimationFrame.bind(window);
 
 // ---------------------------------------------------------------------------
 // Loading — shared core
@@ -145,6 +156,7 @@ function installModel(object, name, materialInfo = {}) {
   container.scale.setScalar(2 / maxDim);
 
   currentModel = container;
+  currentName = (name || 'model').replace(/\.[^.]+$/, '');
   pivot.add(container);
 
   resetView();
@@ -369,7 +381,7 @@ canvas.addEventListener('pointermove', (e) => {
 
   if (panning) {
     panBy(dx, dy);
-  } else {
+  } else if (!spinning) {
     // Trackball-style: premultiply so rotation is always in world space,
     // which avoids the gimbal weirdness of stacking Euler angles.
     const q = new THREE.Quaternion();
@@ -460,6 +472,130 @@ function status(msg, kind = 'ok', hideAfter = 2600) {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // ---------------------------------------------------------------------------
+// Turntable — the orientation used by both the live preview and the GIF
+// ---------------------------------------------------------------------------
+// The model is tilted by (pitch, roll), then spun a full 360° about the world
+// vertical. A full turn returns to the start, so frame 0 == frame N and the GIF
+// loops seamlessly regardless of the tilt.
+const _tilt = new THREE.Quaternion();
+const _yaw = new THREE.Quaternion();
+const _euler = new THREE.Euler();
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+
+function applyOrientation(p) {
+  _euler.set(
+    THREE.MathUtils.degToRad(settings.pitch), 0,
+    THREE.MathUtils.degToRad(settings.roll), 'ZYX'
+  );
+  _tilt.setFromEuler(_euler);
+  _yaw.setFromAxisAngle(Y_AXIS, p * Math.PI * 2);
+  pivot.quaternion.copy(_yaw).multiply(_tilt); // world-space yaw ∘ object tilt
+}
+
+// ---------------------------------------------------------------------------
+// GIF capture (CCapture, self-contained streaming GIF encoder)
+// ---------------------------------------------------------------------------
+function enterCaptureResolution(size) {
+  const prev = new THREE.Vector2();
+  renderer.getSize(prev);
+  const prevPR = renderer.getPixelRatio();
+  const prevAspect = camera.aspect;
+  renderer.setPixelRatio(1);
+  renderer.setSize(size, size, false); // square drawing buffer; leave CSS size alone
+  camera.aspect = 1;
+  camera.updateProjectionMatrix();
+  return () => {
+    renderer.setPixelRatio(prevPR);
+    renderer.setSize(prev.x, prev.y, false);
+    camera.aspect = prevAspect;
+    camera.updateProjectionMatrix();
+    resize();
+  };
+}
+
+function setCapProgress(p, label) {
+  const pct = Math.round(p * 100);
+  el('capfill').style.width = pct + '%';
+  el('capPct').textContent = pct + '%';
+  if (label) el('capLabel').textContent = label;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function recordGif() {
+  if (capturing) return;
+  if (!currentModel) return status('Load a model first.', 'error');
+  if (!window.CCapture) return status('Recorder did not load — check vendor/ccapture.', 'error');
+
+  capturing = true;
+  const wasSpinning = spinning;
+  const savedQuat = pivot.quaternion.clone();
+  const { frames, fps, size } = settings;
+
+  renderer.setAnimationLoop(null);          // take over the loop during capture
+  const restore = enterCaptureResolution(size);
+  el('capture').classList.add('show');
+  setCapProgress(0, 'Rendering frames…');
+
+  const capturer = new window.CCapture({
+    format: 'gif',
+    framerate: fps,
+    gifColors: 256,
+    manual: true,        // we advance one frame per iteration ourselves
+    verbose: false,
+  });
+
+  try {
+    await capturer.start();
+    for (let i = 0; i < frames; i++) {
+      applyOrientation(i / frames);
+      renderer.render(scene, camera);
+      await capturer.capture(renderer.domElement);
+      setCapProgress((i + 1) / frames);
+      await new Promise((r) => nativeRAF(r)); // yield so the progress bar paints
+    }
+    await capturer.stop();
+    setCapProgress(1, 'Encoding GIF…');
+    const blob = await capturer.save(() => {}); // no-op cb suppresses auto-download
+    if (!blob) throw new Error('encoder returned no data');
+    downloadBlob(blob, `${currentName}-spin.gif`);
+    status('GIF saved', 'ok');
+  } catch (err) {
+    status(`Recording failed: ${err.message}`, 'error');
+  } finally {
+    restore();
+    el('capture').classList.remove('show');
+    capturing = false;
+    spinning = wasSpinning;
+    if (!spinning) { pivot.quaternion.copy(savedQuat); updateHUD(); }
+    lastFrameT = performance.now();
+    renderer.setAnimationLoop(renderLoop);  // resume normal loop
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tuning panel
+// ---------------------------------------------------------------------------
+function syncReadouts() {
+  el('framesVal').textContent = settings.frames;
+  el('fpsVal').textContent = settings.fps;
+  el('pitchVal').textContent = settings.pitch + '\u00b0';
+  el('rollVal').textContent = settings.roll + '\u00b0';
+  el('sizeVal').textContent = settings.size + 'px';
+  el('loopVal').textContent = (settings.frames / settings.fps).toFixed(2) + ' s';
+  el('stepVal').textContent = (360 / settings.frames).toFixed(1) + '\u00b0';
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 el('loadUrl').addEventListener('click', () => loadFromURL(el('url').value));
@@ -468,6 +604,46 @@ el('url').addEventListener('keydown', (e) => {
 });
 el('file').addEventListener('change', (e) => loadFromFiles(e.target.files));
 el('reset').addEventListener('click', resetView);
+
+// --- Tuning panel controls ---
+function bindRange(id, key, poseAffecting) {
+  const input = el(id);
+  input.addEventListener('input', () => {
+    settings[key] = Number(input.value);
+    syncReadouts();
+    if (poseAffecting && !spinning && currentModel) applyOrientation(phase); // live pose
+  });
+}
+bindRange('frames', 'frames', false);
+bindRange('fps', 'fps', false);
+bindRange('pitch', 'pitch', true);
+bindRange('roll', 'roll', true);
+
+el('sizeSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  settings.size = Number(btn.dataset.size);
+  [...el('sizeSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
+  syncReadouts();
+});
+
+el('previewBtn').addEventListener('click', () => {
+  if (!currentModel) return status('Load a model first.', 'error');
+  spinning = !spinning;
+  el('previewBtn').classList.toggle('on', spinning);
+  el('previewBtn').textContent = spinning ? 'Stop' : 'Preview';
+  lastFrameT = performance.now();
+  if (!spinning) updateHUD();
+});
+
+el('recordBtn').addEventListener('click', recordGif);
+
+el('panelToggle').addEventListener('click', () => {
+  const collapsed = el('panel').classList.toggle('collapsed');
+  el('panelToggle').textContent = collapsed ? '+' : '\u2013';
+});
+
+syncReadouts();
 
 // Recursively pull File objects out of a dropped directory entry.
 function walkEntry(entry, out) {
@@ -533,4 +709,15 @@ resize();
 canvas.style.cursor = 'grab';
 updateHUD();
 
-renderer.setAnimationLoop(() => renderer.render(scene, camera));
+function renderLoop() {
+  const now = performance.now();
+  if (spinning && !capturing) {
+    const dt = (now - lastFrameT) / 1000;
+    phase = (phase + (settings.fps / settings.frames) * dt) % 1; // preview matches GIF speed
+    applyOrientation(phase);
+    updateHUD();
+  }
+  lastFrameT = now;
+  renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(renderLoop);

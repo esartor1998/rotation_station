@@ -1,7 +1,7 @@
 {
-  "name": "obj-model-preview",
+  "name": "rotation-station",
   "version": "1.0.0",
-  "description": "Interactive Three.js preview for .obj models — upload a file or load one from a URL.",
+  "description": "Rotation Station — an interactive Three.js .obj/.mtl/.zip viewer that exports looping rotating GIFs.",
   "type": "module",
   "engines": {
     "node": ">=18"

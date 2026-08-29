@@ -158,6 +158,6 @@ app.get('/proxy', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`OBJ preview \u2192 http://localhost:${PORT}`);
+  console.log(`Rotation Station \u2192 http://localhost:${PORT}`);
   console.log(`Serving static files from: ${PUBLIC_DIR}`);
 });

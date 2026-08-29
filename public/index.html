@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>OBJ Preview</title>
+<title>Rotation Station</title>
+
+<!-- CCapture (self-contained streaming GIF encoder — no worker, no CDN). -->
+<script src="./vendor/ccapture.umd.min.js"></script>
 
 <!-- Three.js is loaded from a CDN at runtime via an import map.
      Swap these for local/bundled copies if you need to run offline. -->
@@ -196,16 +199,103 @@
   }
   #drop.show { display: flex; }
 
+  /* ---- Rotation Station tuning panel --------------------------------------- */
+  #panel {
+    position: fixed;
+    top: 62px; right: 14px;
+    z-index: 9;
+    width: 268px;
+    background: rgba(22,25,30,.94);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    backdrop-filter: blur(8px);
+    overflow: hidden;
+  }
+  #panel .phead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 13px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--line);
+  }
+  #panel .phead b { color: var(--accent); font-weight: 600; }
+  #panel .pbody { padding: 12px 13px 14px; display: grid; gap: 13px; }
+  #panel.collapsed .pbody { display: none; }
+  #panelToggle {
+    background: none; border: none; padding: 0; margin: 0;
+    color: var(--muted); font-family: var(--mono); font-size: 15px; cursor: pointer;
+  }
+
+  .ctl { display: grid; gap: 6px; }
+  .ctl .lbl {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+  }
+  .ctl .lbl .val { color: var(--accent); }
+
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 3px; border-radius: 2px;
+    background: var(--line); outline: none; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; border: 2px solid #1a1205;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer; border: 2px solid #1a1205;
+  }
+
+  .seg { display: flex; gap: 4px; }
+  .seg button {
+    flex: 1; padding: 6px 0; font-family: var(--mono); font-size: 12px;
+    background: var(--surface-2); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+  }
+  .seg button.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+
+  .readout {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    display: flex; justify-content: space-between;
+    padding-top: 2px; border-top: 1px solid var(--line);
+  }
+  .readout .val { color: var(--text); }
+
+  .pactions { display: flex; gap: 8px; }
+  #previewBtn { flex: 1; }
+  #previewBtn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+  #recordBtn { flex: 1; }
+
   @media (max-width: 720px) {
     input[type="url"] { width: 40vw; }
     .brand { display: none; }
     #legend { display: none; }
+    #panel { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
   }
+
+  /* ---- Capture overlay ----------------------------------------------------- */
+  #capture {
+    position: fixed; inset: 0; z-index: 30;
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    background: rgba(13,15,18,.86);
+    font-family: var(--mono); color: var(--text);
+  }
+  #capture.show { display: flex; }
+  #capture .cap-label { font-size: 13px; letter-spacing: .08em; color: var(--accent); }
+  #capbar {
+    width: min(60vw, 320px); height: 4px; border-radius: 2px;
+    background: var(--line); overflow: hidden;
+  }
+  #capfill { height: 100%; width: 0%; background: var(--accent); transition: width .1s linear; }
+  #capture .cap-pct { font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
   <div id="rail">
-    <span class="brand">OBJ&nbsp;<b>PREVIEW</b></span>
+    <span class="brand">ROTATION&nbsp;<b>STATION</b></span>
 
     <div class="rail-group">
       <input id="url" type="url" inputmode="url"
@@ -241,8 +331,55 @@
     <div><kbd>scroll</kbd> zoom · <kbd>R</kbd> recenter · <kbd>G</kbd> grid</div>
   </div>
 
+  <div id="panel">
+    <div class="phead">
+      <span>GIF&nbsp;<b>turntable</b></span>
+      <button id="panelToggle" title="Collapse">–</button>
+    </div>
+    <div class="pbody">
+      <div class="ctl">
+        <div class="lbl"><span>Frames / rotation</span><span class="val" id="framesVal">60</span></div>
+        <input id="frames" type="range" min="8" max="240" step="1" value="60" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Playback FPS</span><span class="val" id="fpsVal">30</span></div>
+        <input id="fps" type="range" min="10" max="60" step="1" value="30" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Pitch</span><span class="val" id="pitchVal">20°</span></div>
+        <input id="pitch" type="range" min="-90" max="90" step="1" value="20" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Roll</span><span class="val" id="rollVal">0°</span></div>
+        <input id="roll" type="range" min="-45" max="45" step="1" value="0" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Output size</span><span class="val" id="sizeVal">480px</span></div>
+        <div class="seg" id="sizeSeg">
+          <button data-size="256">256</button>
+          <button data-size="480" class="on">480</button>
+          <button data-size="720">720</button>
+        </div>
+      </div>
+      <div class="readout">
+        <span>loop <span class="val" id="loopVal">2.00 s</span></span>
+        <span><span class="val" id="stepVal">6.0°</span>/frame</span>
+      </div>
+      <div class="pactions">
+        <button id="previewBtn">Preview</button>
+        <button id="recordBtn" class="primary">Record GIF</button>
+      </div>
+    </div>
+  </div>
+
   <div id="status"></div>
   <div id="drop">drop a .zip, or a .obj with its .mtl + textures (or a folder)</div>
+
+  <div id="capture">
+    <div class="cap-label" id="capLabel">Rendering…</div>
+    <div id="capbar"><div id="capfill"></div></div>
+    <div class="cap-pct" id="capPct">0%</div>
+  </div>
 
   <script type="module" src="./viewer.js"></script>
 </body>
