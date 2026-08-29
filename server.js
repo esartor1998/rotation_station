@@ -7,8 +7,20 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const PORT = 4182;
+// Host/port are configurable for deployment; defaults suit local use.
+const PORT = Number(process.env.PORT) || 4182;
+const HOST = process.env.HOST || '0.0.0.0'; // 0.0.0.0 so a reverse proxy can reach it
+
 const app = express();
+app.disable('x-powered-by');
+
+// Behind a reverse proxy, set TRUST_PROXY (e.g. TRUST_PROXY=1, or a subnet) so
+// Express reads X-Forwarded-* correctly. Leave it unset when exposed directly —
+// trusting these headers without a proxy in front lets clients spoof their IP.
+if (process.env.TRUST_PROXY) {
+  const tp = process.env.TRUST_PROXY;
+  app.set('trust proxy', tp === 'true' ? true : /^\d+$/.test(tp) ? Number(tp) : tp);
+}
 
 // ---- Locate the static files ------------------------------------------------
 // Prefer a ./public folder, but fall back to the server's own directory so the
@@ -112,6 +124,9 @@ async function safeFetch(startUrl) {
   throw new Error('Too many redirects');
 }
 
+// ---- Health check (useful for reverse proxies / orchestrators) --------------
+app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
+
 // ---- Proxy endpoint ---------------------------------------------------------
 app.get('/proxy', async (req, res) => {
   const target = req.query.url;
@@ -157,7 +172,9 @@ app.get('/proxy', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Rotation Station \u2192 http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  const shown = HOST === '0.0.0.0' ? 'localhost' : HOST;
+  console.log(`Rotation Station \u2192 http://${shown}:${PORT}`);
   console.log(`Serving static files from: ${PUBLIC_DIR}`);
+  if (process.env.TRUST_PROXY) console.log(`trust proxy: ${app.get('trust proxy')}`);
 });

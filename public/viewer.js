@@ -77,6 +77,27 @@ function extractMtlLibs(objText) {
 
 const basename = (p) => p.split(/[\\/]/).pop();
 
+// Build a same-origin proxy URL *relative to wherever the app is mounted*, so it
+// keeps working behind a reverse proxy at a sub-path (e.g. /rotation-station/).
+// Requires the page to be served with a trailing slash — see the deploy notes.
+function proxyURL(target) {
+  const u = new URL('proxy', document.baseURI);
+  u.searchParams.set('url', target);
+  return u.href;
+}
+
+// A 1×1 transparent PNG. Returned instead of ever handing a loader a file:// or
+// bare OS path — browsers refuse to load those from an http(s) page ("may not
+// load or link to file:///"), so we swap in a harmless pixel instead.
+const BLANK_PIXEL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+// Only http(s) survives as something we can safely route; everything else
+// (file:, about:, C:\…) becomes the blank pixel.
+function safeTextureURL(resolvedAbsolute) {
+  return /^https?:\/\//i.test(resolvedAbsolute) ? proxyURL(resolvedAbsolute) : BLANK_PIXEL;
+}
+
 // mtlResolver(libName) -> Promise<string|null> returns the .mtl text.
 // manager is a THREE.LoadingManager whose URL modifier routes texture requests
 // to blob URLs (uploads) or the /proxy endpoint (web).
@@ -298,7 +319,7 @@ async function loadFromFiles(fileList) {
   manager.setURLModifier((url) => {
     if (url.startsWith('blob:') || url.startsWith('data:')) return url;
     const hit = imageUrlByName.get(basename(url).toLowerCase());
-    return hit || url;
+    return hit || BLANK_PIXEL; // don't attempt a file:// / disk path the .mtl may name
   });
 
   const objText = await objFile.text();
@@ -314,7 +335,7 @@ async function loadFromFiles(fileList) {
 // Loading — remote URL (.obj, its .mtl, and textures via the proxy)
 // ---------------------------------------------------------------------------
 async function proxyText(url) {
-  const res = await fetch('/proxy?url=' + encodeURIComponent(url));
+  const res = await fetch(proxyURL(url));
   if (!res.ok) throw new Error(await res.text());
   return res.text();
 }
@@ -332,9 +353,8 @@ async function loadFromURL(rawUrl) {
     manager.setURLModifier((u) => {
       if (u.startsWith('blob:') || u.startsWith('data:')) return u;
       let abs;
-      try { abs = new URL(u, url).href; } catch { abs = u; }
-      if (/^https?:\/\//i.test(abs)) return '/proxy?url=' + encodeURIComponent(abs);
-      return u;
+      try { abs = new URL(u, url).href; } catch { return BLANK_PIXEL; }
+      return safeTextureURL(abs); // http(s) → proxy; file:// etc → blank pixel
     });
 
     const mtlResolver = async (lib) => {
