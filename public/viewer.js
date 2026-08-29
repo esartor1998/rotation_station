@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 
 // ---------------------------------------------------------------------------
 // Scene, camera, renderer
@@ -38,34 +39,70 @@ scene.add(grid);
 const pivot = new THREE.Group();
 scene.add(pivot);
 
-// Fallback material for meshes that arrive without one.
+// Fallback material for meshes that arrive with no material at all.
 const defaultMaterial = new THREE.MeshStandardMaterial({
   color: 0x9aa4b2, metalness: 0.05, roughness: 0.75, side: THREE.DoubleSide,
 });
 
 let currentModel = null;   // the centered/scaled group inside the pivot
 let baseDistance = 5;      // camera Z that framed the model at zoom = 1
+let activeBlobUrls = [];   // object URLs for uploaded textures, revoked on reload
 
 // ---------------------------------------------------------------------------
-// Loading
+// Loading — shared core
 // ---------------------------------------------------------------------------
-const loader = new OBJLoader();
 
-function loadFromText(text, name = 'model.obj') {
+// Pull every filename referenced by `mtllib` lines out of the OBJ text.
+function extractMtlLibs(objText) {
+  const libs = [];
+  const re = /^\s*mtllib\s+(.+)$/gim;
+  let m;
+  while ((m = re.exec(objText))) {
+    m[1].trim().split(/\s+/).forEach((n) => n && libs.push(n));
+  }
+  return [...new Set(libs)];
+}
+
+const basename = (p) => p.split(/[\\/]/).pop();
+
+// mtlResolver(libName) -> Promise<string|null> returns the .mtl text.
+// manager is a THREE.LoadingManager whose URL modifier routes texture requests
+// to blob URLs (uploads) or the /proxy endpoint (web).
+async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) {
+  const libs = extractMtlLibs(objText);
+  const objLoader = new OBJLoader(manager);
+  let materialInfo = { requested: libs.length, loaded: 0 };
+
+  if (libs.length && mtlResolver) {
+    const texts = [];
+    for (const lib of libs) {
+      try {
+        const t = await mtlResolver(lib);
+        if (t) texts.push(t);
+      } catch { /* missing .mtl — fall back to default material */ }
+    }
+    if (texts.length) {
+      const mtlLoader = new MTLLoader(manager);
+      const creator = mtlLoader.parse(texts.join('\n'), '');
+      creator.preload();                 // builds materials + kicks off textures
+      objLoader.setMaterials(creator);
+      materialInfo.loaded = texts.length;
+    }
+  }
+
   let object;
   try {
-    object = loader.parse(text);
+    object = objLoader.parse(objText);
   } catch (err) {
     return status(`Parse failed: ${err.message}`, 'error');
   }
   if (!object || object.children.length === 0) {
     return status('No geometry found in that file.', 'error');
   }
-  installModel(object, name);
+  installModel(object, objName, materialInfo);
 }
 
-function installModel(object, name) {
-  // Drop the previous model.
+function installModel(object, name, materialInfo = {}) {
   if (currentModel) {
     pivot.remove(currentModel);
     disposeTree(currentModel);
@@ -75,22 +112,36 @@ function installModel(object, name) {
   object.traverse((child) => {
     if (!child.isMesh) return;
     if (!child.geometry.attributes.normal) child.geometry.computeVertexNormals();
-    if (isDefaultObjMaterial(child.material)) child.material = defaultMaterial;
+
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((mat, i) => {
+      // Only replace the blank material OBJLoader invents when no .mtl matched;
+      // keep anything that came from an .mtl.
+      if (isBlankObjMaterial(mat)) {
+        if (Array.isArray(child.material)) child.material[i] = defaultMaterial;
+        else child.material = defaultMaterial;
+        return;
+      }
+      mat.side = THREE.DoubleSide;                 // preview-friendly
+      if (mat.map) mat.map.colorSpace = THREE.SRGBColorSpace; // correct texture color
+      mat.needsUpdate = true;
+    });
+
     const g = child.geometry;
     triangles += g.index ? g.index.count / 3 : g.attributes.position.count / 3;
   });
 
-  // Center the model's bounding box on the pivot origin, then scale it so its
-  // largest dimension is ~2 world units — this frames any model consistently.
+  // Center the bounding box on the pivot origin, then scale so the largest
+  // dimension is ~2 world units — frames any model consistently.
   const box = new THREE.Box3().setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
 
   const container = new THREE.Group();
-  object.position.sub(center);          // recenter geometry
+  object.position.sub(center);
   container.add(object);
-  container.scale.setScalar(2 / maxDim); // normalize size
+  container.scale.setScalar(2 / maxDim);
 
   currentModel = container;
   pivot.add(container);
@@ -98,49 +149,114 @@ function installModel(object, name) {
   resetView();
 
   document.getElementById('hud-name').textContent = name;
-  document.getElementById('hud-tris').textContent =
-    Math.round(triangles).toLocaleString();
-  status(`Loaded ${name}`, 'ok');
+  document.getElementById('hud-tris').textContent = Math.round(triangles).toLocaleString();
+
+  const { requested = 0, loaded = 0 } = materialInfo;
+  if (requested && !loaded) status(`Loaded ${name} — .mtl not found, using default material`, 'ok');
+  else if (loaded) status(`Loaded ${name} with materials`, 'ok');
+  else status(`Loaded ${name}`, 'ok');
+}
+
+// OBJLoader gives meshes with no matched material a nameless MeshPhongMaterial.
+function isBlankObjMaterial(mat) {
+  return mat && mat.isMeshPhongMaterial && (mat.name === '' || mat.name == null);
+}
+
+function disposeTree(root) {
+  root.traverse((child) => {
+    if (!child.isMesh) return;
+    child.geometry?.dispose();
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((m) => {
+      if (!m || m === defaultMaterial) return;
+      m.map?.dispose();
+      m.dispose();
+    });
+  });
+}
+
+function clearBlobUrls() {
+  activeBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+  activeBlobUrls = [];
+}
+
+// ---------------------------------------------------------------------------
+// Loading — local files (.obj + .mtl + textures)
+// ---------------------------------------------------------------------------
+async function loadFromFiles(fileList) {
+  const files = [...fileList];
+  const objFile = files.find((f) => /\.obj$/i.test(f.name));
+  if (!objFile) {
+    return status('Selection has no .obj file.', 'error');
+  }
+
+  clearBlobUrls();
+
+  // Index everything by lowercased basename; make blob URLs for images.
+  const fileByName = new Map();
+  const imageUrlByName = new Map();
+  for (const f of files) {
+    const key = f.name.toLowerCase();
+    fileByName.set(key, f);
+    if (/\.(png|jpe?g|bmp|gif|webp|tga)$/i.test(f.name)) {
+      const url = URL.createObjectURL(f);
+      activeBlobUrls.push(url);
+      imageUrlByName.set(key, url);
+    }
+  }
+
+  const manager = new THREE.LoadingManager();
+  manager.setURLModifier((url) => {
+    if (url.startsWith('blob:') || url.startsWith('data:')) return url;
+    const hit = imageUrlByName.get(basename(url).toLowerCase());
+    return hit || url;
+  });
+
+  const objText = await objFile.text();
+  const mtlResolver = async (lib) => {
+    const f = fileByName.get(basename(lib).toLowerCase());
+    return f ? await f.text() : null;
+  };
+
+  await loadObjWithMaterials({ objText, objName: objFile.name, mtlResolver, manager });
+}
+
+// ---------------------------------------------------------------------------
+// Loading — remote URL (.obj, its .mtl, and textures via the proxy)
+// ---------------------------------------------------------------------------
+async function proxyText(url) {
+  const res = await fetch('/proxy?url=' + encodeURIComponent(url));
+  if (!res.ok) throw new Error(await res.text());
+  return res.text();
 }
 
 async function loadFromURL(rawUrl) {
   const url = rawUrl.trim();
   if (!url) return;
   status('Fetching…', 'busy', 0);
+  clearBlobUrls();
   try {
-    // Go through the server proxy to dodge cross-origin restrictions.
-    const res = await fetch('/proxy?url=' + encodeURIComponent(url));
-    if (!res.ok) throw new Error(await res.text());
-    const text = await res.text();
-    const name = url.split('/').pop().split('?')[0] || 'model.obj';
-    loadFromText(text, name);
+    const objText = await proxyText(url);
+    const objName = basename(url.split('?')[0]) || 'model.obj';
+
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier((u) => {
+      if (u.startsWith('blob:') || u.startsWith('data:')) return u;
+      let abs;
+      try { abs = new URL(u, url).href; } catch { abs = u; }
+      if (/^https?:\/\//i.test(abs)) return '/proxy?url=' + encodeURIComponent(abs);
+      return u;
+    });
+
+    const mtlResolver = async (lib) => {
+      const absMtl = new URL(lib, url).href;
+      return proxyText(absMtl);
+    };
+
+    await loadObjWithMaterials({ objText, objName, mtlResolver, manager });
   } catch (err) {
     status(`Load failed: ${err.message}`, 'error');
   }
-}
-
-function loadFromFile(file) {
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => loadFromText(reader.result, file.name);
-  reader.onerror = () => status('Could not read that file.', 'error');
-  reader.readAsText(file);
-}
-
-// A freshly-parsed OBJ mesh with no .mtl gets a plain white MeshPhongMaterial.
-// Detect that so we can swap in something nicer, but keep real materials.
-function isDefaultObjMaterial(mat) {
-  return mat && mat.isMeshPhongMaterial && mat.name === '';
-}
-
-function disposeTree(root) {
-  root.traverse((child) => {
-    if (child.isMesh) {
-      child.geometry?.dispose();
-      const mats = Array.isArray(child.material) ? child.material : [child.material];
-      mats.forEach((m) => m && m !== defaultMaterial && m.dispose());
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -201,14 +317,13 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag
 // Translate the model in the camera plane. Convert pixel deltas to world units
 // using the view size at the model's distance so panning tracks the cursor.
 function panBy(dxPixels, dyPixels) {
-  const dist = camera.position.z; // camera looks down -Z at the origin plane
+  const dist = camera.position.z;
   const worldPerPixel =
     (2 * dist * Math.tan((camera.fov * Math.PI) / 360)) / stage.clientHeight;
   pivot.position.x += dxPixels * worldPerPixel;
   pivot.position.y -= dyPixels * worldPerPixel;
 }
 
-// Scroll to zoom (dolly the camera; the model never moves off its own axis).
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   zoom = clamp(zoom * (e.deltaY > 0 ? 1 / ZOOM_STEP : ZOOM_STEP), MIN_ZOOM, MAX_ZOOM);
@@ -216,7 +331,6 @@ canvas.addEventListener('wheel', (e) => {
   updateHUD();
 }, { passive: false });
 
-// Arrow keys nudge the model around; R recenters, G toggles the grid.
 window.addEventListener('keydown', (e) => {
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA') return; // don't hijack the URL box
@@ -251,10 +365,10 @@ const deg = (r) => Math.round((r * 180) / Math.PI);
 
 function updateHUD() {
   const e = new THREE.Euler().setFromQuaternion(pivot.quaternion, 'YXZ');
-  el('hud-rot').textContent = `${deg(e.x)}°, ${deg(e.y)}°, ${deg(e.z)}°`;
+  el('hud-rot').textContent = `${deg(e.x)}\u00b0, ${deg(e.y)}\u00b0, ${deg(e.z)}\u00b0`;
   el('hud-pos').textContent =
     `${pivot.position.x.toFixed(2)}, ${pivot.position.y.toFixed(2)}`;
-  el('hud-zoom').textContent = `${zoom.toFixed(2)}×`;
+  el('hud-zoom').textContent = `${zoom.toFixed(2)}\u00d7`;
 }
 
 let statusTimer;
@@ -275,19 +389,56 @@ el('loadUrl').addEventListener('click', () => loadFromURL(el('url').value));
 el('url').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') loadFromURL(el('url').value);
 });
-el('file').addEventListener('change', (e) => loadFromFile(e.target.files[0]));
+el('file').addEventListener('change', (e) => loadFromFiles(e.target.files));
 el('reset').addEventListener('click', resetView);
 
-// Drag-and-drop a file anywhere onto the viewport.
+// Recursively pull File objects out of a dropped directory entry.
+function walkEntry(entry, out) {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file((f) => { out.push(f); resolve(); }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readBatch = () => reader.readEntries(async (entries) => {
+        if (!entries.length) return resolve();
+        for (const e of entries) await walkEntry(e, out);
+        readBatch();
+      }, () => resolve());
+      readBatch();
+    } else {
+      resolve();
+    }
+  });
+}
+
 const drop = el('drop');
 window.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('show'); });
 window.addEventListener('dragleave', (e) => { if (e.relatedTarget === null) drop.classList.remove('show'); });
 window.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('show');
-  const file = e.dataTransfer.files[0];
-  if (file && /\.obj$/i.test(file.name)) loadFromFile(file);
-  else status('Drop a .obj file.', 'error');
+  const dt = e.dataTransfer;
+
+  // Grab directory entries synchronously — they expire after the first await.
+  let entries = null;
+  if (dt.items && dt.items.length && dt.items[0].webkitGetAsEntry) {
+    entries = [];
+    for (const it of dt.items) {
+      const en = it.webkitGetAsEntry();
+      if (en) entries.push(en);
+    }
+  }
+  const plainFiles = [...dt.files];
+
+  (async () => {
+    let files = [];
+    if (entries && entries.length) {
+      for (const en of entries) await walkEntry(en, files);
+    }
+    if (!files.length) files = plainFiles;
+    if (files.some((f) => /\.obj$/i.test(f.name))) loadFromFiles(files);
+    else status('Drop a folder or files that include a .obj.', 'error');
+  })();
 });
 
 // ---------------------------------------------------------------------------
