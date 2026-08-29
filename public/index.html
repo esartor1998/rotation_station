@@ -11,7 +11,8 @@
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js"
   }
 }
 </script>
@@ -24,7 +25,7 @@
     --line:      #2a2f38;
     --text:      #e6e9ee;
     --muted:     #808a98;
-    --accent:    #ffc24b;   /* cute accent or not? you decide in the comments */
+    --accent:    #ffc24b;   /* signal amber — the one loud thing */
     --accent-dim:#5a4a24;
     --danger:    #ff6b6b;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -217,7 +218,7 @@
     <div class="rail-group">
       <label class="filelabel" tabindex="0">
         Open files
-        <input id="file" type="file" accept=".obj,.mtl,image/*" multiple />
+        <input id="file" type="file" accept=".obj,.mtl,.zip,image/*" multiple />
       </label>
       <button id="reset" title="Recenter the model">Recenter</button>
     </div>
@@ -241,7 +242,7 @@
   </div>
 
   <div id="status"></div>
-  <div id="drop">drop a .obj (with its .mtl + textures, or a whole folder)</div>
+  <div id="drop">drop a .zip, or a .obj with its .mtl + textures (or a folder)</div>
 
   <script type="module" src="./viewer.js"></script>
 </body>

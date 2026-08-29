@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { unzip } from 'fflate';
 
 // ---------------------------------------------------------------------------
 // Scene, camera, renderer
@@ -181,13 +182,89 @@ function clearBlobUrls() {
 }
 
 // ---------------------------------------------------------------------------
-// Loading — local files (.obj + .mtl + textures)
+// Zip handling — extract .obj/.mtl/textures in the browser, with guards
+// ---------------------------------------------------------------------------
+// Limits are enforced against the zip's *declared* sizes before decompression,
+// so a decompression bomb never gets expanded. Names are sanitised against
+// zip-slip. Everything stays client-side — nothing is written to disk.
+const ZIP_MAX_INPUT = 150 * 1024 * 1024;        // reject a zip file bigger than this
+const ZIP_MAX_TOTAL = 300 * 1024 * 1024;        // cap total uncompressed bytes
+const ZIP_MAX_FILE = 150 * 1024 * 1024;         // cap any single uncompressed file
+const ZIP_MAX_ENTRIES = 5000;
+const MODEL_FILE_RE = /\.(obj|mtl|png|jpe?g|bmp|gif|webp|tga)$/i;
+
+function extractZip(file) {
+  return new Promise((resolve, reject) => {
+    if (file.size > ZIP_MAX_INPUT) {
+      return reject(new Error('Zip is larger than the 150 MB limit.'));
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read the zip file.'));
+    reader.onload = () => {
+      const data = new Uint8Array(reader.result);
+      let total = 0, count = 0, aborted = null;
+
+      unzip(data, {
+        // Runs on each central-directory entry BEFORE it is decompressed.
+        filter: (f) => {
+          if (aborted) return false;
+          if (++count > ZIP_MAX_ENTRIES) { aborted = 'Zip has too many files.'; return false; }
+
+          const name = f.name;
+          if (name.endsWith('/')) return false;                 // directory entry
+          if (name.includes('..') || name.startsWith('/') || /^[a-zA-Z]:/.test(name)) {
+            return false;                                        // zip-slip / absolute path
+          }
+          if (!MODEL_FILE_RE.test(name)) return false;          // only model assets
+
+          const size = f.originalSize || 0;
+          if (size > ZIP_MAX_FILE) { aborted = 'A file inside the zip is too large.'; return false; }
+          total += size;
+          if (total > ZIP_MAX_TOTAL) { aborted = 'Zip contents exceed the size limit.'; return false; }
+          return true;
+        },
+      }, (err, unzipped) => {
+        if (err) return reject(new Error('Could not unzip: ' + err.message));
+        if (aborted) return reject(new Error(aborted));
+
+        const files = Object.entries(unzipped).map(([p, bytes]) =>
+          new File([bytes], p.split(/[\\/]/).pop())); // keep basename only
+        if (!files.length) return reject(new Error('No model files found in the zip.'));
+        resolve(files);
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// Replace any dropped/selected .zip with its extracted contents.
+async function gatherFiles(inputFiles) {
+  const out = [];
+  for (const f of inputFiles) {
+    if (/\.zip$/i.test(f.name)) {
+      status('Unzipping…', 'busy', 0);
+      out.push(...await extractZip(f));
+    } else {
+      out.push(f);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Loading — local files (.obj + .mtl + textures, or a .zip of them)
 // ---------------------------------------------------------------------------
 async function loadFromFiles(fileList) {
-  const files = [...fileList];
+  let files;
+  try {
+    files = await gatherFiles([...fileList]);
+  } catch (err) {
+    return status(err.message, 'error');
+  }
+
   const objFile = files.find((f) => /\.obj$/i.test(f.name));
   if (!objFile) {
-    return status('Selection has no .obj file.', 'error');
+    return status('No .obj file found.', 'error');
   }
 
   clearBlobUrls();
@@ -436,8 +513,8 @@ window.addEventListener('drop', (e) => {
       for (const en of entries) await walkEntry(en, files);
     }
     if (!files.length) files = plainFiles;
-    if (files.some((f) => /\.obj$/i.test(f.name))) loadFromFiles(files);
-    else status('Drop a folder or files that include a .obj.', 'error');
+    if (files.some((f) => /\.(obj|zip)$/i.test(f.name))) loadFromFiles(files);
+    else status('Drop a .zip, a folder, or files that include a .obj.', 'error');
   })();
 });
 
