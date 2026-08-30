@@ -5,17 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Rotation Station</title>
 
-<!-- CCapture (self-contained streaming GIF encoder — no worker, no CDN). -->
-<script src="./vendor/ccapture.umd.min.js"></script>
-
-<!-- Three.js is loaded from a CDN at runtime via an import map.
-     Swap these for local/bundled copies if you need to run offline. -->
+<!-- Three.js, fflate (zip), and gifenc (transparent GIF encoder) load from a
+     CDN via the import map below. Vendor them locally for a CDN-free deploy. -->
 <script type="importmap">
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-    "fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js"
+    "fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js",
+    "gifenc": "https://cdn.jsdelivr.net/npm/gifenc@1.0.3/dist/gifenc.esm.js"
   }
 }
 </script>
@@ -359,6 +357,13 @@
           <button data-size="256">256</button>
           <button data-size="480" class="on">480</button>
           <button data-size="720">720</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Background</span></div>
+        <div class="seg" id="bgSeg">
+          <button data-bg="1" class="on">Transparent</button>
+          <button data-bg="0">Solid</button>
         </div>
       </div>
       <div class="readout">

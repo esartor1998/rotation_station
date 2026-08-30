@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { unzip } from 'fflate';
+import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 
 // ---------------------------------------------------------------------------
 // Scene, camera, renderer
@@ -15,7 +16,7 @@ const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
 camera.position.set(0, 0, 5);
 camera.lookAt(0, 0, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
@@ -51,7 +52,7 @@ let baseDistance = 5;      // camera Z that framed the model at zoom = 1
 let activeBlobUrls = [];   // object URLs for uploaded textures, revoked on reload
 
 // Turntable / GIF settings, driven by the tuning panel.
-const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480 };
+const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480, transparent: true };
 let spinning = false;      // live preview spin
 let capturing = false;     // GIF capture in progress
 let phase = 0;             // 0..1 position within the current rotation
@@ -513,7 +514,7 @@ function applyOrientation(p) {
 }
 
 // ---------------------------------------------------------------------------
-// GIF capture (CCapture, self-contained streaming GIF encoder)
+// GIF capture (gifenc — small, worker-free, supports 1-bit alpha transparency)
 // ---------------------------------------------------------------------------
 function enterCaptureResolution(size) {
   const prev = new THREE.Vector2();
@@ -551,47 +552,76 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// Read the WebGL canvas back as straight-alpha RGBA via a reused 2D canvas.
+let _readCanvas = null, _readCtx = null;
+function readCanvasRGBA(src) {
+  const w = src.width, h = src.height;
+  if (!_readCtx || _readCanvas.width !== w || _readCanvas.height !== h) {
+    _readCanvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
+    _readCtx = _readCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  _readCtx.clearRect(0, 0, w, h);
+  _readCtx.drawImage(src, 0, 0);
+  return _readCtx.getImageData(0, 0, w, h); // { data, width, height }, straight alpha
+}
+
 async function recordGif() {
   if (capturing) return;
   if (!currentModel) return status('Load a model first.', 'error');
-  if (!window.CCapture) return status('Recorder did not load — check vendor/ccapture.', 'error');
 
   capturing = true;
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
-  const { frames, fps, size } = settings;
+  const { frames, fps, size, transparent } = settings;
+  const delay = Math.max(1, Math.round(100 / fps)); // GIF delay is in centiseconds
+  const format = transparent ? 'rgba4444' : 'rgb565';
 
   renderer.setAnimationLoop(null);          // take over the loop during capture
   const restore = enterCaptureResolution(size);
-  el('capture').classList.add('show');
-  setCapProgress(0, 'Rendering frames…');
 
-  const capturer = new window.CCapture({
-    format: 'gif',
-    framerate: fps,
-    gifColors: 256,
-    manual: true,        // we advance one frame per iteration ourselves
-    verbose: false,
-  });
+  // For a clean cut-out: clear to fully transparent and hide the reference grid.
+  const savedBg = scene.background;
+  const savedGrid = grid.visible;
+  if (transparent) {
+    scene.background = null;
+    renderer.setClearColor(0x000000, 0);
+  }
+  grid.visible = false;
+
+  el('capture').classList.add('show');
+  setCapProgress(0, transparent ? 'Rendering (transparent)…' : 'Rendering frames…');
 
   try {
-    await capturer.start();
+    const gif = GIFEncoder();
     for (let i = 0; i < frames; i++) {
       applyOrientation(i / frames);
       renderer.render(scene, camera);
-      await capturer.capture(renderer.domElement);
-      setCapProgress((i + 1) / frames);
+
+      const { data, width, height } = readCanvasRGBA(renderer.domElement);
+      // 1-bit alpha: pixels below the alpha threshold become the transparent index.
+      const palette = quantize(data, 256, transparent ? { format, oneBitAlpha: true } : { format });
+      const index = applyPalette(data, palette, format);
+      gif.writeFrame(index, width, height,
+        transparent ? { palette, delay, transparent: true, transparentIndex: 0 }
+                    : { palette, delay });
+
+      setCapProgress((i + 1) / frames * 0.92);
       await new Promise((r) => nativeRAF(r)); // yield so the progress bar paints
     }
-    await capturer.stop();
-    setCapProgress(1, 'Encoding GIF…');
-    const blob = await capturer.save(() => {}); // no-op cb suppresses auto-download
-    if (!blob) throw new Error('encoder returned no data');
+    setCapProgress(0.96, 'Encoding GIF…');
+    gif.finish();
+    const blob = new Blob([gif.bytes()], { type: 'image/gif' });
+    setCapProgress(1);
     downloadBlob(blob, `${currentName}-spin.gif`);
     status('GIF saved', 'ok');
   } catch (err) {
     status(`Recording failed: ${err.message}`, 'error');
   } finally {
+    if (transparent) {
+      scene.background = savedBg;
+      renderer.setClearColor(0x000000, 1);
+    }
+    grid.visible = savedGrid;
     restore();
     el('capture').classList.remove('show');
     capturing = false;
@@ -645,6 +675,13 @@ el('sizeSeg').addEventListener('click', (e) => {
   settings.size = Number(btn.dataset.size);
   [...el('sizeSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
   syncReadouts();
+});
+
+el('bgSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  settings.transparent = btn.dataset.bg === '1';
+  [...el('bgSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
 });
 
 el('previewBtn').addEventListener('click', () => {

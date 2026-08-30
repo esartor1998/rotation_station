@@ -80,8 +80,16 @@ vendor those locally if you need a CDN-free deployment.
 
 - Local files (uploads, zips, folders) are parsed entirely in the browser —
   nothing is written to the server.
+- GIFs export with a **transparent background** by default (Background →
+  Transparent in the panel; switch to Solid for the viewport colour). GIF alpha
+  is 1-bit, so anti-aliased edges are cut at a hard threshold — expect slightly
+  crisp edges rather than a soft feather. The reference grid is omitted from the
+  GIF automatically.
 - The `proxy` endpoint blocks non-`http(s)` schemes and private/internal
   addresses (SSRF), re-validates redirects, times out, and caps response size.
   Add rate-limiting before exposing it publicly.
 - GIF frame delays are stored in centiseconds, so 30 fps → ~33 ms/frame. Use 33
   or 50 fps for an exact rate.
+- Three.js, fflate, and gifenc load from the jsDelivr CDN via the import map in
+  `index.html`. To run without a CDN, download those three files and repoint the
+  import map at local copies.
