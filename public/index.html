@@ -225,7 +225,7 @@
   }
   .phead-actions { display: flex; align-items: center; gap: 9px; }
   .advbtn {
-    font-family: var(--mono); font-size: 9.5px; letter-spacing: .12em;
+    font-family: var(--mono); font-size: 9px; letter-spacing: .10em;
     text-transform: uppercase; color: var(--muted);
     background: var(--surface-2); border: 1px solid var(--line);
     border-radius: 4px; padding: 2px 7px; cursor: pointer; line-height: 1.4;
@@ -321,7 +321,7 @@
     <div class="rail-group">
       <label class="filelabel" tabindex="0">
         Open files
-        <input id="file" type="file" accept=".obj,.mtl,.zip,image/*" multiple />
+        <input id="file" type="file" accept=".obj,.mtl,.dae,.gltf,.glb,.stl,.ply,.fbx,.bin,.zip,image/*" multiple />
       </label>
       <button id="reset" title="Recenter the model">Recenter</button>
     </div>
@@ -348,7 +348,7 @@
     <div class="phead">
       <span>GIF&nbsp;<b>turntable</b></span>
       <span class="phead-actions">
-        <button id="advToggle" class="advbtn" title="Manual frames / fps control">Adv</button>
+        <button id="advToggle" class="advbtn" title="Manual frames / fps control">Exp. Mode</button>
         <button id="panelToggle" title="Collapse">–</button>
       </span>
     </div>
@@ -421,7 +421,7 @@
   </div>
 
   <div id="status"></div>
-  <div id="drop">drop a .zip, or a .obj with its .mtl + textures (or a folder)</div>
+  <div id="drop">drop a model (.obj/.dae/.gltf/.glb/.stl/.ply/.fbx), a .zip, or a folder</div>
 
   <div id="capture">
     <div class="cap-label" id="capLabel">Rendering…</div>

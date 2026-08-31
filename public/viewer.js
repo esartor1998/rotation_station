@@ -178,6 +178,82 @@ async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) 
   installModel(object, objName, materialInfo);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-format loading — dispatch to the right three.js loader by extension.
+// Loaders are imported lazily (via the CDN import map) so they cost nothing
+// until a model of that type is actually opened.
+// ---------------------------------------------------------------------------
+const SUPPORTED_RE = /\.(obj|dae|gltf|glb|stl|ply|fbx)$/i;
+const FORMAT_PRIORITY = ['obj', 'glb', 'gltf', 'fbx', 'dae', 'stl', 'ply'];
+const extOf = (name) => (name.split('.').pop() || '').toLowerCase();
+const toArrayBuffer = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+
+async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }) {
+  const ext = extOf(name);
+  const text = () => new TextDecoder('utf-8').decode(bytes);
+
+  try {
+    if (ext === 'obj') {
+      return await loadObjWithMaterials({ objText: text(), objName: name, mtlResolver, manager });
+    }
+    if (ext === 'dae') {
+      const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
+      const result = new ColladaLoader(manager).parse(text(), texBase);
+      return finishScene(result && result.scene, name);
+    }
+    if (ext === 'gltf' || ext === 'glb') {
+      const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+      const loader = new GLTFLoader(manager);
+      const data = ext === 'glb' ? toArrayBuffer(bytes) : text();
+      return await new Promise((resolve) => {
+        loader.parse(data, texBase,
+          (gltf) => { finishScene(gltf.scene, name); resolve(); },
+          (err) => { status(`Parse failed: ${err.message || err}`, 'error'); resolve(); });
+      });
+    }
+    if (ext === 'fbx') {
+      const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js');
+      return finishScene(new FBXLoader(manager).parse(toArrayBuffer(bytes), texBase), name);
+    }
+    if (ext === 'stl') {
+      const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
+      return finishGeometry(new STLLoader().parse(toArrayBuffer(bytes)), name, false);
+    }
+    if (ext === 'ply') {
+      const { PLYLoader } = await import('three/addons/loaders/PLYLoader.js');
+      return finishGeometry(new PLYLoader().parse(toArrayBuffer(bytes)), name, true);
+    }
+    return status(`Unsupported format: .${ext}`, 'error');
+  } catch (err) {
+    return status(`Parse failed: ${err.message || err}`, 'error');
+  }
+}
+
+// A loader that returns a scene/group (Collada, glTF, FBX).
+function finishScene(scene, name) {
+  if (!scene) return status('No geometry found in that file.', 'error');
+  let hasMesh = false;
+  scene.traverse((c) => { if (c.isMesh) hasMesh = true; });
+  if (!hasMesh) return status('No geometry found in that file.', 'error');
+  installModel(scene, name, {});
+}
+
+// A loader that returns bare geometry (STL, PLY) — wrap it in a mesh.
+function finishGeometry(geo, name, preferVertexColors) {
+  if (!geo || !geo.getAttribute('position')) {
+    return status('No geometry found in that file.', 'error');
+  }
+  if (!geo.getAttribute('normal')) geo.computeVertexNormals();
+  const hasColor = preferVertexColors && !!geo.getAttribute('color');
+  const mat = new THREE.MeshStandardMaterial({
+    color: hasColor ? 0xffffff : 0x9aa4b2, vertexColors: hasColor,
+    metalness: 0.05, roughness: 0.8, side: THREE.DoubleSide,
+  });
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(geo, mat));
+  installModel(group, name, {});
+}
+
 function installModel(object, name, materialInfo = {}) {
   if (currentModel) {
     pivot.remove(currentModel);
@@ -191,9 +267,9 @@ function installModel(object, name, materialInfo = {}) {
 
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     mats.forEach((mat, i) => {
-      // Only replace the blank material OBJLoader invents when no .mtl matched;
-      // keep anything that came from an .mtl.
-      if (isBlankObjMaterial(mat)) {
+      // Replace a missing material, or the blank one OBJLoader invents when no
+      // .mtl matched; keep real materials from .mtl / glTF / Collada / etc.
+      if (!mat || isBlankObjMaterial(mat)) {
         if (Array.isArray(child.material)) child.material[i] = defaultMaterial;
         else child.material = defaultMaterial;
         return;
@@ -267,10 +343,10 @@ const ZIP_MAX_INPUT = 150 * 1024 * 1024;        // reject a zip file bigger than
 const ZIP_MAX_TOTAL = 300 * 1024 * 1024;        // cap total uncompressed bytes
 const ZIP_MAX_FILE = 150 * 1024 * 1024;         // cap any single uncompressed file
 const ZIP_MAX_ENTRIES = 5000;
-const MODEL_FILE_RE = /\.(obj|mtl|png|jpe?g|bmp|gif|webp|tga)$/i;
-// Recognised 3D formats we DON'T support — used only to give a helpful message
-// when a zip has models but no .obj (common on model-ripping sites).
-const OTHER_MODEL_RE = /\.(dae|fbx|gltf|glb|stl|ply|3ds|blend|smd|pmx|pmd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x)$/i;
+const MODEL_FILE_RE = /\.(obj|mtl|dae|gltf|glb|stl|ply|fbx|bin|png|jpe?g|bmp|gif|webp|tga|dds|ktx2)$/i;
+// Recognised 3D formats we still DON'T support — used only to give a helpful
+// message when a zip has models but none we can open.
+const OTHER_MODEL_RE = /\.(blend|3ds|smd|pmx|pmd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x|usd[acz]?)$/i;
 let lastOtherModels = []; // unsupported model formats seen in the last archive
 
 function extractZip(file) {
@@ -349,43 +425,47 @@ async function loadFromFiles(fileList) {
     return status(err.message, 'error');
   }
 
-  const objFile = files.find((f) => /\.obj$/i.test(f.name));
-  if (!objFile) {
+  // Pick the primary model file by format preference.
+  let primary = null, bestRank = Infinity;
+  for (const f of files) {
+    const rank = FORMAT_PRIORITY.indexOf(extOf(f.name));
+    if (rank !== -1 && rank < bestRank) { bestRank = rank; primary = f; }
+  }
+  if (!primary) {
     if (lastOtherModels.length) {
-      return status(`Archive has no .obj (found ${lastOtherModels.join(', ')}). Only OBJ is supported.`, 'error');
+      return status(`Archive has no supported model (found ${lastOtherModels.join(', ')}).`, 'error');
     }
-    return status('No .obj file found.', 'error');
+    return status('No supported model file found (.obj, .dae, .gltf/.glb, .stl, .ply, .fbx).', 'error');
   }
 
   clearBlobUrls();
 
-  // Index everything by lowercased basename; make blob URLs for images.
+  // Index everything by lowercased basename. Blob-URL *every* file (textures,
+  // .bin buffers, etc.) so referenced resources resolve regardless of format.
   const fileByName = new Map();
-  const imageUrlByName = new Map();
+  const urlByName = new Map();
   for (const f of files) {
     const key = f.name.toLowerCase();
     fileByName.set(key, f);
-    if (/\.(png|jpe?g|bmp|gif|webp|tga)$/i.test(f.name)) {
-      const url = URL.createObjectURL(f);
-      activeBlobUrls.push(url);
-      imageUrlByName.set(key, url);
-    }
+    const url = URL.createObjectURL(f);
+    activeBlobUrls.push(url);
+    urlByName.set(key, url);
   }
 
   const manager = new THREE.LoadingManager();
   manager.setURLModifier((url) => {
     if (url.startsWith('blob:') || url.startsWith('data:')) return url;
-    const hit = imageUrlByName.get(basename(url).toLowerCase());
-    return hit || BLANK_PIXEL; // don't attempt a file:// / disk path the .mtl may name
+    const hit = urlByName.get(basename(url).toLowerCase());
+    return hit || BLANK_PIXEL; // never hand a loader a file:// / disk path
   });
 
-  const objText = await objFile.text();
   const mtlResolver = async (lib) => {
     const f = fileByName.get(basename(lib).toLowerCase());
     return f ? await f.text() : null;
   };
 
-  await loadObjWithMaterials({ objText, objName: objFile.name, mtlResolver, manager });
+  const bytes = new Uint8Array(await primary.arrayBuffer());
+  await dispatchModel({ name: primary.name, bytes, manager, mtlResolver, texBase: '' });
 }
 
 // ---------------------------------------------------------------------------
@@ -426,9 +506,9 @@ async function loadFromURL(rawUrl) {
       return loadFromFiles([new File([bytes], zipName)]);
     }
 
-    // Otherwise treat it as a plain OBJ; textures/mtl resolve through the proxy.
-    const objText = new TextDecoder('utf-8').decode(bytes);
-    const objName = /\.obj$/i.test(name) ? name : 'model.obj';
+    // Otherwise treat it as a single model file; textures/mtl/.bin resolve
+    // through the proxy relative to this URL.
+    const objName = SUPPORTED_RE.test(name) ? name : 'model.obj';
 
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((u) => {
@@ -440,7 +520,7 @@ async function loadFromURL(rawUrl) {
 
     const mtlResolver = async (lib) => proxyText(new URL(lib, url).href);
 
-    await loadObjWithMaterials({ objText, objName, mtlResolver, manager });
+    await dispatchModel({ name: objName, bytes, manager, mtlResolver, texBase: url });
   } catch (err) {
     status(`Load failed: ${err.message}`, 'error');
   }

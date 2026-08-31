@@ -1,7 +1,10 @@
 # Rotation Station
 
-An interactive Three.js viewer for `.obj` models — load a file, a `.zip`, a folder,
-or a URL; inspect it; then export a smooth, seamlessly-looping rotating **GIF**.
+An interactive Three.js model viewer — load a file, a `.zip`, a folder, or a URL;
+inspect it; then export a smooth, seamlessly-looping rotating **GIF**.
+
+Supported formats: **.obj** (+`.mtl`), **.dae** (Collada), **.gltf/.glb**,
+**.stl**, **.ply**, and **.fbx** — each with their associated textures.
 
 ## Run
 
@@ -124,10 +127,14 @@ vendor those locally if you need a CDN-free deployment.
 - GIF alpha is 1-bit, so anti-aliased edges are cut at a hard threshold. The
   reference grid is omitted from the GIF automatically.
 - Local files (uploads, zips, folders) are parsed entirely in the browser.
+- Multiple formats are supported (.obj/.mtl, .dae, .gltf/.glb, .stl, .ply, .fbx).
+  Loaders are lazy-loaded per format, so opening a `.dae` only fetches the
+  Collada loader, etc. STL/PLY get a default material (PLY keeps vertex colours);
+  the rest carry their own materials and textures.
 - A **remote `.zip`** works too: paste the URL and it's fetched (through the
   hardened proxy) and unzipped in the browser, same as a local one. If an archive
-  has no `.obj`, the app names the unsupported model formats it found (e.g. a
-  `.fbx`/`.dae`-only rip) instead of failing vaguely.
+  has no file we can open, the app names the unsupported formats it found (e.g. a
+  `.blend`-only rip) instead of failing vaguely.
 - OBJ text is normalized (BOM stripped, CR/CRLF line endings) before parsing, so
   files from various exporters don't silently yield "no geometry".
 - The `proxy` endpoint blocks non-`http(s)` schemes and private/internal
