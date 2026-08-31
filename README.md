@@ -11,8 +11,9 @@ npm start          # http://localhost:4182
 ```
 
 Load a model (Open files / drag-drop a `.zip` or folder / paste a URL), open the
-**GIF turntable** panel, hit **Preview** to dial in frames, FPS, pitch and roll,
-then **Record GIF**.
+**GIF turntable** panel, pick a **Rotation speed** and **Smoothness**, tweak pitch
+and roll, then **Record GIF**. On a touchscreen: one finger rotates, two fingers
+pinch-zoom and pan.
 
 ## Configuration (env vars)
 
@@ -78,18 +79,26 @@ vendor those locally if you need a CDN-free deployment.
 
 ## Notes / limits
 
-- Local files (uploads, zips, folders) are parsed entirely in the browser —
-  nothing is written to the server.
-- GIFs export with a **transparent background** by default (Background →
-  Transparent in the panel; switch to Solid for the viewport colour). GIF alpha
-  is 1-bit, so anti-aliased edges are cut at a hard threshold — expect slightly
-  crisp edges rather than a soft feather. The reference grid is omitted from the
-  GIF automatically.
+- **Rotation speed / Smoothness** presets set the frame count and playback fps
+  for you: speed fixes how long one turn takes, smoothness sets the fps, and
+  frames-per-rotation is derived — so a smoother GIF adds frames without slowing
+  the spin.
+- **Touch:** one-finger drag rotates, two-finger pinch zooms and pans. The
+  desktop mouse/keyboard controls are unchanged.
+- GIFs export with a **transparent background** by default. On export the GIF is
+  **trimmed to the model's content box** (union across all frames) and encoded
+  with a **single global colour palette** — both cut file size substantially.
+  All of this runs in the browser; the GIF is never uploaded, so there's no
+  server-side processing of untrusted data (the secure choice — no `gifsicle`
+  subprocess on user content). Trimming applies to transparent exports; a solid
+  background has no transparent border to trim.
+- GIF alpha is 1-bit, so anti-aliased edges are cut at a hard threshold. The
+  reference grid is omitted from the GIF automatically.
+- Local files (uploads, zips, folders) are parsed entirely in the browser.
 - The `proxy` endpoint blocks non-`http(s)` schemes and private/internal
   addresses (SSRF), re-validates redirects, times out, and caps response size.
   Add rate-limiting before exposing it publicly.
-- GIF frame delays are stored in centiseconds, so 30 fps → ~33 ms/frame. Use 33
-  or 50 fps for an exact rate.
+- GIF frame delays are stored in centiseconds, so 30 fps → ~33 ms/frame.
 - Three.js, fflate, and gifenc load from the jsDelivr CDN via the import map in
   `index.html`. To run without a CDN, download those three files and repoint the
   import map at local copies.

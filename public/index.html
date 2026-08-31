@@ -113,7 +113,7 @@
 
   /* ---- Viewport ------------------------------------------------------------ */
   #stage { position: fixed; inset: 0; }
-  canvas { display: block; }
+  canvas { display: block; touch-action: none; }
 
   /* ---- Telemetry HUD (the signature element) ------------------------------- */
   #hud {
@@ -223,6 +223,20 @@
     background: none; border: none; padding: 0; margin: 0;
     color: var(--muted); font-family: var(--mono); font-size: 15px; cursor: pointer;
   }
+  .phead-actions { display: flex; align-items: center; gap: 9px; }
+  .advbtn {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted);
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 7px; cursor: pointer; line-height: 1.4;
+  }
+  .advbtn:hover { border-color: var(--accent); }
+  .advbtn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+
+  /* Presets by default; manual sliders when the panel is in advanced mode. */
+  #panel .manual-ctl { display: none; }
+  #panel.advanced .preset-ctl { display: none; }
+  #panel.advanced .manual-ctl { display: grid; }
 
   .ctl { display: grid; gap: 6px; }
   .ctl .lbl {
@@ -270,6 +284,7 @@
     input[type="url"] { width: 40vw; }
     .brand { display: none; }
     #legend { display: none; }
+    #hud { display: none; }
     #panel { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
   }
 
@@ -332,15 +347,36 @@
   <div id="panel">
     <div class="phead">
       <span>GIF&nbsp;<b>turntable</b></span>
-      <button id="panelToggle" title="Collapse">–</button>
+      <span class="phead-actions">
+        <button id="advToggle" class="advbtn" title="Manual frames / fps control">Adv</button>
+        <button id="panelToggle" title="Collapse">–</button>
+      </span>
     </div>
     <div class="pbody">
-      <div class="ctl">
-        <div class="lbl"><span>Frames / rotation</span><span class="val" id="framesVal">60</span></div>
-        <input id="frames" type="range" min="8" max="240" step="1" value="60" />
+      <div class="ctl preset-ctl">
+        <div class="lbl"><span>Rotation speed</span></div>
+        <div class="seg" id="speedSeg">
+          <button data-i="0">Slow</button>
+          <button data-i="1" class="on">Medium</button>
+          <button data-i="2">Fast</button>
+          <button data-i="3">Turbo</button>
+        </div>
       </div>
-      <div class="ctl">
-        <div class="lbl"><span>Playback FPS</span><span class="val" id="fpsVal">30</span></div>
+      <div class="ctl preset-ctl">
+        <div class="lbl"><span>Smoothness</span></div>
+        <div class="seg" id="smoothSeg">
+          <button data-i="0">Basic</button>
+          <button data-i="1">Smooth</button>
+          <button data-i="2" class="on">Silky</button>
+          <button data-i="3">Ultra</button>
+        </div>
+      </div>
+      <div class="ctl manual-ctl">
+        <div class="lbl"><span>Frames / rotation</span><span class="val" id="framesManVal">75</span></div>
+        <input id="frames" type="range" min="8" max="240" step="1" value="75" />
+      </div>
+      <div class="ctl manual-ctl">
+        <div class="lbl"><span>Playback FPS</span><span class="val" id="fpsManVal">30</span></div>
         <input id="fps" type="range" min="10" max="60" step="1" value="30" />
       </div>
       <div class="ctl">
@@ -366,9 +402,16 @@
           <button data-bg="0">Solid</button>
         </div>
       </div>
+      <div class="ctl">
+        <div class="lbl"><span>Optimize filesize</span></div>
+        <div class="seg" id="optSeg">
+          <button data-opt="1" class="on">On</button>
+          <button data-opt="0">Off</button>
+        </div>
+      </div>
       <div class="readout">
-        <span>loop <span class="val" id="loopVal">2.00 s</span></span>
-        <span><span class="val" id="stepVal">6.0°</span>/frame</span>
+        <span>loop <span class="val" id="loopVal">2.50 s</span></span>
+        <span><span class="val" id="framesVal">75</span> f · <span class="val" id="fpsVal">30</span> fps</span>
       </div>
       <div class="pactions">
         <button id="previewBtn">Preview</button>

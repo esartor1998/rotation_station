@@ -52,7 +52,33 @@ let baseDistance = 5;      // camera Z that framed the model at zoom = 1
 let activeBlobUrls = [];   // object URLs for uploaded textures, revoked on reload
 
 // Turntable / GIF settings, driven by the tuning panel.
-const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480, transparent: true };
+const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480, transparent: true, optimize: true };
+
+// The two easy presets. "Rotation speed" sets how long one full turn takes;
+// "smoothness" sets the playback fps. Frames-per-rotation is then derived
+// (frames = fps × turnSec), so a smoother GIF adds frames *without* slowing the
+// spin — which is exactly the balance users were struggling to strike by hand.
+const SPEED_PRESETS = [ // seconds per full 360° turn (ascending speed)
+  { label: 'Slow', turnSec: 4.0 },
+  { label: 'Medium', turnSec: 2.5 },
+  { label: 'Fast', turnSec: 1.5 },
+  { label: 'Turbo', turnSec: 0.8 },
+];
+const SMOOTH_PRESETS = [ // playback fps (ascending smoothness)
+  { label: 'Basic', fps: 12 },
+  { label: 'Smooth', fps: 20 },
+  { label: 'Silky', fps: 30 },
+  { label: 'Ultra', fps: 48 },
+];
+let speedIdx = 1;   // Medium
+let smoothIdx = 2;  // Silky
+
+function applyPresets() {
+  const turnSec = SPEED_PRESETS[speedIdx].turnSec;
+  settings.fps = SMOOTH_PRESETS[smoothIdx].fps;
+  settings.frames = Math.min(240, Math.max(8, Math.round(settings.fps * turnSec)));
+  syncReadouts();
+}
 let spinning = false;      // live preview spin
 let capturing = false;     // GIF capture in progress
 let phase = 0;             // 0..1 position within the current rotation
@@ -370,41 +396,76 @@ async function loadFromURL(rawUrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Interaction — rotate (drag), move (ctrl+drag / arrows), zoom (scroll)
+// Interaction — works with mouse and touch through Pointer Events:
+//   • 1 pointer drag           → rotate  (ctrl/⌘/right-drag → pan)
+//   • 2 pointers (touch)       → pinch to zoom + two-finger pan
+//   • wheel / arrow keys       → zoom / move  (desktop)
 // ---------------------------------------------------------------------------
 const ROTATE_SPEED = 0.008;   // radians per pixel
 const KEY_STEP = 0.12;        // world units per arrow press
 const ZOOM_STEP = 1.12;       // scroll multiplier
 const MIN_ZOOM = 0.25, MAX_ZOOM = 8;
 
-let dragging = false;
-let panning = false;
-let lastX = 0, lastY = 0;
 let zoom = 1;
+let lastX = 0, lastY = 0;
+let mode = 'none';            // 'rotate' | 'pan' | 'gesture' | 'none'
+const pointers = new Map();  // pointerId -> { x, y }
+let pinch = { dist: 0, midX: 0, midY: 0 };
 
 const canvas = renderer.domElement;
+const pts = () => [...pointers.values()];
+
+function refreshMode(e) {
+  if (pointers.size >= 2) {
+    mode = 'gesture';
+    const [a, b] = pts();
+    pinch.dist = Math.hypot(a.x - b.x, a.y - b.y);
+    pinch.midX = (a.x + b.x) / 2;
+    pinch.midY = (a.y + b.y) / 2;
+  } else if (pointers.size === 1) {
+    const wantsPan = !!e && (e.ctrlKey || e.metaKey || e.button === 2);
+    mode = wantsPan ? 'pan' : (spinning ? 'none' : 'rotate');
+    const p = pts()[0];
+    lastX = p.x; lastY = p.y;                       // re-anchor to avoid jumps
+  } else {
+    mode = 'none';
+  }
+  canvas.style.cursor = mode === 'pan' ? 'move' : mode === 'rotate' ? 'grabbing' : 'grab';
+}
 
 canvas.addEventListener('pointerdown', (e) => {
-  dragging = true;
-  panning = e.ctrlKey || e.metaKey || e.button === 2;
-  lastX = e.clientX;
-  lastY = e.clientY;
   canvas.setPointerCapture(e.pointerId);
-  canvas.style.cursor = panning ? 'move' : 'grabbing';
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  refreshMode(e);
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  if (!dragging) return;
-  const dx = e.clientX - lastX;
-  const dy = e.clientY - lastY;
-  lastX = e.clientX;
-  lastY = e.clientY;
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  e.preventDefault();
 
-  if (panning) {
+  if (mode === 'gesture' && pointers.size >= 2) {
+    const [a, b] = pts();
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
+    if (pinch.dist > 0) {
+      zoom = clamp(zoom * (dist / pinch.dist), MIN_ZOOM, MAX_ZOOM);
+      camera.position.z = baseDistance / zoom;
+    }
+    panBy(midX - pinch.midX, midY - pinch.midY);    // two-finger pan
+    pinch.dist = dist; pinch.midX = midX; pinch.midY = midY;
+    updateHUD();
+    return;
+  }
+
+  const p = pts()[0];
+  const dx = p.x - lastX, dy = p.y - lastY;
+  lastX = p.x; lastY = p.y;
+
+  if (mode === 'pan') {
     panBy(dx, dy);
-  } else if (!spinning) {
-    // Trackball-style: premultiply so rotation is always in world space,
-    // which avoids the gimbal weirdness of stacking Euler angles.
+  } else if (mode === 'rotate' && !spinning) {
+    // Trackball-style: premultiply so rotation is always in world space.
     const q = new THREE.Quaternion();
     q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), dx * ROTATE_SPEED);
     pivot.quaternion.premultiply(q);
@@ -414,14 +475,14 @@ canvas.addEventListener('pointermove', (e) => {
   updateHUD();
 });
 
-function endDrag(e) {
-  if (!dragging) return;
-  dragging = false;
+function endPointer(e) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
   try { canvas.releasePointerCapture(e.pointerId); } catch {}
-  canvas.style.cursor = 'grab';
+  refreshMode();  // 2→1 re-anchors the survivor; 1→0 goes idle
 }
-canvas.addEventListener('pointerup', endDrag);
-canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
 canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag pans
 
 // Translate the model in the camera plane. Convert pixel deltas to world units
@@ -565,6 +626,37 @@ function readCanvasRGBA(src) {
   return _readCtx.getImageData(0, 0, w, h); // { data, width, height }, straight alpha
 }
 
+// Copy a rectangular sub-region out of a full-frame RGBA buffer.
+function cropRGBA(data, srcW, rect) {
+  if (rect.x === 0 && rect.y === 0 && rect.w === srcW && rect.h * srcW * 4 === data.length) {
+    return data; // already the whole frame — no copy needed
+  }
+  const out = new Uint8ClampedArray(rect.w * rect.h * 4);
+  const rowBytes = rect.w * 4;
+  for (let row = 0; row < rect.h; row++) {
+    const src = ((rect.y + row) * srcW + rect.x) * 4;
+    out.set(data.subarray(src, src + rowBytes), row * rowBytes);
+  }
+  return out;
+}
+
+function concatRGBA(list) {
+  if (list.length === 1) return list[0];
+  let total = 0;
+  for (const d of list) total += d.length;
+  const out = new Uint8ClampedArray(total);
+  let off = 0;
+  for (const d of list) { out.set(d, off); off += d.length; }
+  return out;
+}
+
+const ALPHA_THRESHOLD = 8;  // matches the GIF's 1-bit alpha cut
+const CROP_PAD = 1;         // keep a hair of margin around the content
+const SAMPLE_FRAMES = 12;   // frames sampled to build the shared palette
+
+// Everything below runs entirely in the browser — the generated GIF is never
+// uploaded, so this optimization adds zero server attack surface (the secure
+// option by construction; no shelling out to gifsicle on untrusted data).
 async function recordGif() {
   if (capturing) return;
   if (!currentModel) return status('Load a model first.', 'error');
@@ -572,7 +664,7 @@ async function recordGif() {
   capturing = true;
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
-  const { frames, fps, size, transparent } = settings;
+  const { frames, size, fps, transparent, optimize } = settings;
   const delay = Math.max(1, Math.round(100 / fps)); // GIF delay is in centiseconds
   const format = transparent ? 'rgba4444' : 'rgb565';
 
@@ -582,45 +674,105 @@ async function recordGif() {
   // For a clean cut-out: clear to fully transparent and hide the reference grid.
   const savedBg = scene.background;
   const savedGrid = grid.visible;
-  if (transparent) {
-    scene.background = null;
-    renderer.setClearColor(0x000000, 0);
-  }
+  if (transparent) { scene.background = null; renderer.setClearColor(0x000000, 0); }
   grid.visible = false;
 
   el('capture').classList.add('show');
-  setCapProgress(0, transparent ? 'Rendering (transparent)…' : 'Rendering frames…');
+  setCapProgress(0, 'Analysing frames…');
+
+  const renderFrame = (i) => { applyOrientation(i / frames); renderer.render(scene, camera); };
+  const yield_ = () => new Promise((r) => nativeRAF(r));
 
   try {
-    const gif = GIFEncoder();
-    for (let i = 0; i < frames; i++) {
-      applyOrientation(i / frames);
-      renderer.render(scene, camera);
+    // ---- Pass 1: content box (always, when transparent) + palette sample ----
+    // The bounding-box trim always runs. The "optimize filesize" switch only
+    // chooses a shared global palette (on) vs a per-frame palette (off).
+    let rect = { x: 0, y: 0, w: size, h: size };
+    let palette = null; // non-null ⇒ one shared global palette for all frames
 
-      const { data, width, height } = readCanvasRGBA(renderer.domElement);
-      // 1-bit alpha: pixels below the alpha threshold become the transparent index.
-      const palette = quantize(data, 256, transparent ? { format, oneBitAlpha: true } : { format });
-      const index = applyPalette(data, palette, format);
-      gif.writeFrame(index, width, height,
-        transparent ? { palette, delay, transparent: true, transparentIndex: 0 }
-                    : { palette, delay });
+    const needBBox = transparent;   // trim transparent exports to their content
+    const needSample = optimize;    // sample frames to build a global palette
+    const pass1 = needBBox || needSample;
 
-      setCapProgress((i + 1) / frames * 0.92);
-      await new Promise((r) => nativeRAF(r)); // yield so the progress bar paints
+    if (pass1) {
+      let minX = size, minY = size, maxX = -1, maxY = -1;
+      const stride = Math.max(1, Math.floor(frames / SAMPLE_FRAMES));
+      const samples = []; // stored full-frame, cropped afterwards
+
+      for (let i = 0; i < frames; i++) {
+        const isSample = needSample && i % stride === 0 && samples.length < SAMPLE_FRAMES;
+        if (needBBox || isSample) {
+          renderFrame(i);
+          const img = readCanvasRGBA(renderer.domElement);
+          if (needBBox) {
+            // Scan alpha (top byte of each RGBA word) to grow the content box.
+            const u32 = new Uint32Array(img.data.buffer, img.data.byteOffset, size * size);
+            let p = 0;
+            for (let y = 0; y < size; y++) {
+              for (let x = 0; x < size; x++, p++) {
+                if ((u32[p] >>> 24) > ALPHA_THRESHOLD) {
+                  if (x < minX) minX = x; if (x > maxX) maxX = x;
+                  if (y < minY) minY = y; if (y > maxY) maxY = y;
+                }
+              }
+            }
+          }
+          if (isSample) samples.push(img.data.slice());
+          await yield_();
+        }
+        setCapProgress((i + 1) / frames * 0.45);
+      }
+
+      // Content rectangle (padded), or the full frame when opaque / empty.
+      if (transparent && maxX >= minX && maxY >= minY) {
+        const x = Math.max(0, minX - CROP_PAD);
+        const y = Math.max(0, minY - CROP_PAD);
+        rect = {
+          x, y,
+          w: Math.min(size, maxX + 1 + CROP_PAD) - x,
+          h: Math.min(size, maxY + 1 + CROP_PAD) - y,
+        };
+      }
+
+      // One global palette from the cropped samples → a single color table for
+      // the whole GIF instead of a local table per frame (a large size saving).
+      if (needSample) {
+        const sample = concatRGBA(samples.map((d) => cropRGBA(d, size, rect)));
+        palette = quantize(sample, 256, transparent ? { format, oneBitAlpha: true } : { format });
+      }
     }
-    setCapProgress(0.96, 'Encoding GIF…');
+
+    // ---- Pass 2: encode every frame ----------------------------------------
+    const p2start = pass1 ? 0.45 : 0;
+    const p2span = pass1 ? 0.5 : 0.95;
+    setCapProgress(p2start, 'Encoding GIF…');
+    const gif = GIFEncoder();
+    const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
+    for (let i = 0; i < frames; i++) {
+      renderFrame(i);
+      const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+      // Shared global palette (optimize on) or a fresh palette per frame (off).
+      const framePalette = palette || quantize(data, 256, qOpts);
+      const index = applyPalette(data, framePalette, format);
+      // A palette on a frame writes a colour table. For the global palette that's
+      // only needed on frame 0; per-frame palettes write one on every frame.
+      const opts = { delay, transparent, transparentIndex: 0 };
+      if (!palette || i === 0) opts.palette = framePalette;
+      gif.writeFrame(index, rect.w, rect.h, opts);
+      setCapProgress(p2start + (i + 1) / frames * p2span);
+      await yield_();
+    }
+
+    setCapProgress(0.98, 'Finishing…');
     gif.finish();
     const blob = new Blob([gif.bytes()], { type: 'image/gif' });
     setCapProgress(1);
     downloadBlob(blob, `${currentName}-spin.gif`);
-    status('GIF saved', 'ok');
+    status(`GIF saved · ${rect.w}\u00d7${rect.h} · ${Math.round(blob.size / 1024)} KB`, 'ok');
   } catch (err) {
     status(`Recording failed: ${err.message}`, 'error');
   } finally {
-    if (transparent) {
-      scene.background = savedBg;
-      renderer.setClearColor(0x000000, 1);
-    }
+    if (transparent) { scene.background = savedBg; renderer.setClearColor(0x000000, 1); }
     grid.visible = savedGrid;
     restore();
     el('capture').classList.remove('show');
@@ -636,13 +788,14 @@ async function recordGif() {
 // Tuning panel
 // ---------------------------------------------------------------------------
 function syncReadouts() {
-  el('framesVal').textContent = settings.frames;
-  el('fpsVal').textContent = settings.fps;
   el('pitchVal').textContent = settings.pitch + '\u00b0';
   el('rollVal').textContent = settings.roll + '\u00b0';
   el('sizeVal').textContent = settings.size + 'px';
   el('loopVal').textContent = (settings.frames / settings.fps).toFixed(2) + ' s';
-  el('stepVal').textContent = (360 / settings.frames).toFixed(1) + '\u00b0';
+  el('framesVal').textContent = settings.frames;
+  el('fpsVal').textContent = settings.fps;
+  el('framesManVal').textContent = settings.frames;
+  el('fpsManVal').textContent = settings.fps;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,25 +817,24 @@ function bindRange(id, key, poseAffecting) {
     if (poseAffecting && !spinning && currentModel) applyOrientation(phase); // live pose
   });
 }
-bindRange('frames', 'frames', false);
-bindRange('fps', 'fps', false);
 bindRange('pitch', 'pitch', true);
 bindRange('roll', 'roll', true);
+bindRange('frames', 'frames', false); // manual mode only (hidden unless Advanced)
+bindRange('fps', 'fps', false);
 
-el('sizeSeg').addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  settings.size = Number(btn.dataset.size);
-  [...el('sizeSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
-  syncReadouts();
-});
-
-el('bgSeg').addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  settings.transparent = btn.dataset.bg === '1';
-  [...el('bgSeg').children].forEach((b) => b.classList.toggle('on', b === btn));
-});
+function bindSeg(segId, onPick) {
+  el(segId).addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    [...el(segId).children].forEach((b) => b.classList.toggle('on', b === btn));
+    onPick(btn);
+  });
+}
+bindSeg('speedSeg', (btn) => { speedIdx = Number(btn.dataset.i); applyPresets(); });
+bindSeg('smoothSeg', (btn) => { smoothIdx = Number(btn.dataset.i); applyPresets(); });
+bindSeg('sizeSeg', (btn) => { settings.size = Number(btn.dataset.size); syncReadouts(); });
+bindSeg('bgSeg', (btn) => { settings.transparent = btn.dataset.bg === '1'; });
+bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; });
 
 el('previewBtn').addEventListener('click', () => {
   if (!currentModel) return status('Load a model first.', 'error');
@@ -700,7 +852,20 @@ el('panelToggle').addEventListener('click', () => {
   el('panelToggle').textContent = collapsed ? '+' : '\u2013';
 });
 
-syncReadouts();
+el('advToggle').addEventListener('click', () => {
+  const adv = el('panel').classList.toggle('advanced');
+  el('advToggle').classList.toggle('on', adv);
+  if (adv) {
+    // Seed the sliders from whatever the presets currently produce.
+    el('frames').value = settings.frames;
+    el('fps').value = settings.fps;
+    syncReadouts();
+  } else {
+    applyPresets(); // presets take back over
+  }
+});
+
+applyPresets(); // sets frames/fps from the default speed + smoothness presets
 
 // Recursively pull File objects out of a dropped directory entry.
 function walkEntry(entry, out) {
