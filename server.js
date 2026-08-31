@@ -47,9 +47,49 @@ app.use(express.static(PUBLIC_DIR));
 // model could otherwise point the URLs at internal services, cloud metadata
 // (169.254.169.254), localhost, etc. We therefore block private address ranges,
 // re-validate every redirect hop, time out, and cap the response size.
-const MAX_BYTES = 25 * 1024 * 1024; // 25 MB per resource
-const FETCH_TIMEOUT_MS = 8000;
+const MAX_BYTES = Number(process.env.PROXY_MAX_BYTES) || 25 * 1024 * 1024; // 25 MB per resource
+const FETCH_TIMEOUT_MS = Number(process.env.PROXY_CONNECT_TIMEOUT_MS) || 8000;   // per hop, to headers
+const STREAM_DEADLINE_MS = Number(process.env.PROXY_STREAM_TIMEOUT_MS) || 20000; // whole request
 const MAX_REDIRECTS = 4;
+const MAX_URL_LENGTH = 2048;
+const PROXY_DISABLED = /^(1|true|yes)$/i.test(process.env.DISABLE_PROXY || '');
+
+// ---- Abuse controls ---------------------------------------------------------
+// The proxy fetches attacker-influenceable URLs, so a flood of requests is the
+// main non-SSRF risk (bandwidth amplification / DoS). A per-IP token bucket
+// allows a normal model load — which bursts the .mtl + every texture at once —
+// while capping sustained volume. Concurrency caps sit above the browser's own
+// ~6-connection limit so legit loads pass but sockets/memory stay bounded.
+const RL_BURST = Number(process.env.PROXY_RATE_BURST) || 60;          // burst allowance / IP
+const RL_REFILL_PER_SEC = Number(process.env.PROXY_RATE_REFILL) || 1; // sustained req/s / IP
+const MAX_CONCURRENT = Number(process.env.PROXY_MAX_CONCURRENT) || 24;         // global in-flight
+const MAX_CONCURRENT_PER_IP = Number(process.env.PROXY_MAX_CONCURRENT_PER_IP) || 8;
+
+const buckets = new Map();        // ip -> { tokens, last }
+const inFlightPerIp = new Map();  // ip -> count
+let inFlight = 0;
+
+// Returns 0 if allowed, else Retry-After seconds.
+function takeToken(ip) {
+  const now = Date.now();
+  let b = buckets.get(ip);
+  if (!b) { b = { tokens: RL_BURST, last: now }; buckets.set(ip, b); }
+  b.tokens = Math.min(RL_BURST, b.tokens + ((now - b.last) / 1000) * RL_REFILL_PER_SEC);
+  b.last = now;
+  if (b.tokens < 1) return Math.max(1, Math.ceil((1 - b.tokens) / RL_REFILL_PER_SEC));
+  b.tokens -= 1;
+  return 0;
+}
+
+// Prune idle buckets so the map can't grow without bound under IP rotation.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, b] of buckets) {
+    const t = Math.min(RL_BURST, b.tokens + ((now - b.last) / 1000) * RL_REFILL_PER_SEC);
+    if (t >= RL_BURST && now - b.last > 60_000) buckets.delete(ip);
+  }
+  if (buckets.size > 100_000) buckets.clear(); // hard cap: shed state under a flood
+}, 60_000).unref();
 
 function isPrivateAddress(ip) {
   const kind = net.isIP(ip);
@@ -82,7 +122,7 @@ async function assertSafeUrl(raw) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error('Only http/https URLs are allowed');
   }
-  const host = url.hostname;
+  const host = url.hostname.replace(/^\[|\]$/g, ''); // unwrap IPv6 literals
   let addresses;
   if (net.isIP(host)) {
     addresses = [host];
@@ -129,10 +169,35 @@ app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
 
 // ---- Proxy endpoint ---------------------------------------------------------
 app.get('/proxy', async (req, res) => {
+  if (PROXY_DISABLED) return res.status(403).send('Remote URL loading is disabled.');
+
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const target = req.query.url;
-  if (typeof target !== 'string') {
-    return res.status(400).send('Pass a "url" query parameter.');
+  if (typeof target !== 'string') return res.status(400).send('Pass a "url" query parameter.');
+  if (target.length > MAX_URL_LENGTH) return res.status(414).send('URL too long.');
+
+  // Per-IP rate limit (token bucket: allows a model's texture burst, caps floods).
+  const retryAfter = takeToken(ip);
+  if (retryAfter) {
+    res.set('Retry-After', String(retryAfter));
+    return res.status(429).send('Rate limit exceeded. Slow down.');
   }
+
+  // Concurrency caps bound sockets/bandwidth without blocking a normal load.
+  if (inFlight >= MAX_CONCURRENT) {
+    res.set('Retry-After', '2');
+    return res.status(503).send('Server busy, retry shortly.');
+  }
+  const perIp = inFlightPerIp.get(ip) || 0;
+  if (perIp >= MAX_CONCURRENT_PER_IP) {
+    res.set('Retry-After', '2');
+    return res.status(429).send('Too many concurrent requests.');
+  }
+
+  inFlight++;
+  inFlightPerIp.set(ip, perIp + 1);
+  const started = Date.now();
+  let reader = null;
 
   try {
     const upstream = await safeFetch(target);
@@ -148,27 +213,36 @@ app.get('/proxy', async (req, res) => {
     // Forward the real content type so images and text both work downstream.
     res.set('Content-Type', upstream.headers.get('content-type') || 'application/octet-stream');
     res.set('Cache-Control', 'no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
     res.set('Access-Control-Allow-Origin', '*');
 
     if (!upstream.body) return res.end();
 
-    // Stream with a hard byte cap so an oversized/endless response can't OOM us.
-    const reader = upstream.body.getReader();
+    // Stream with a hard byte cap AND a whole-request deadline, respecting client
+    // backpressure so neither an oversized/endless upstream nor a slow client can
+    // exhaust memory. (The byte cap also defuses gzip decompression bombs, since
+    // it counts decompressed bytes as they arrive.)
+    reader = upstream.body.getReader();
     let total = 0;
-    while (true) {
+    for (;;) {
+      if (Date.now() - started > STREAM_DEADLINE_MS) { await reader.cancel(); return res.destroy(); }
       const { done, value } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > MAX_BYTES) {
-        await reader.cancel();
-        return res.destroy();
+      if (total > MAX_BYTES) { await reader.cancel(); return res.destroy(); }
+      if (!res.write(Buffer.from(value))) {
+        await new Promise((resolve) => res.once('drain', resolve)); // backpressure
       }
-      res.write(Buffer.from(value));
     }
     res.end();
   } catch (err) {
     if (!res.headersSent) res.status(502).send(`Proxy error: ${err.message}`);
     else res.destroy();
+  } finally {
+    try { reader && reader.cancel(); } catch {}
+    inFlight = Math.max(0, inFlight - 1);
+    const n = (inFlightPerIp.get(ip) || 1) - 1;
+    if (n <= 0) inFlightPerIp.delete(ip); else inFlightPerIp.set(ip, n);
   }
 });
 
@@ -177,4 +251,7 @@ app.listen(PORT, HOST, () => {
   console.log(`Rotation Station \u2192 http://${shown}:${PORT}`);
   console.log(`Serving static files from: ${PUBLIC_DIR}`);
   if (process.env.TRUST_PROXY) console.log(`trust proxy: ${app.get('trust proxy')}`);
+  console.log(PROXY_DISABLED
+    ? 'proxy: DISABLED (remote URL loading off)'
+    : `proxy: on · ${RL_BURST} burst + ${RL_REFILL_PER_SEC}/s per IP · ${MAX_CONCURRENT_PER_IP}/${MAX_CONCURRENT} concurrent · ${(MAX_BYTES / 1048576).toFixed(0)}MB cap`);
 });

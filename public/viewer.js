@@ -140,6 +140,11 @@ function safeTextureURL(resolvedAbsolute) {
 // manager is a THREE.LoadingManager whose URL modifier routes texture requests
 // to blob URLs (uploads) or the /proxy endpoint (web).
 async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) {
+  // Strip a UTF-8 BOM and normalize CR / CRLF line endings — OBJLoader splits on
+  // "\n" only, so a lone-CR file (some exporters) would parse as one line → no
+  // geometry. Do it once here so every load path benefits.
+  objText = objText.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+
   const libs = extractMtlLibs(objText);
   const objLoader = new OBJLoader(manager);
   let materialInfo = { requested: libs.length, loaded: 0 };
@@ -263,6 +268,10 @@ const ZIP_MAX_TOTAL = 300 * 1024 * 1024;        // cap total uncompressed bytes
 const ZIP_MAX_FILE = 150 * 1024 * 1024;         // cap any single uncompressed file
 const ZIP_MAX_ENTRIES = 5000;
 const MODEL_FILE_RE = /\.(obj|mtl|png|jpe?g|bmp|gif|webp|tga)$/i;
+// Recognised 3D formats we DON'T support — used only to give a helpful message
+// when a zip has models but no .obj (common on model-ripping sites).
+const OTHER_MODEL_RE = /\.(dae|fbx|gltf|glb|stl|ply|3ds|blend|smd|pmx|pmd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x)$/i;
+let lastOtherModels = []; // unsupported model formats seen in the last archive
 
 function extractZip(file) {
   return new Promise((resolve, reject) => {
@@ -274,6 +283,7 @@ function extractZip(file) {
     reader.onload = () => {
       const data = new Uint8Array(reader.result);
       let total = 0, count = 0, aborted = null;
+      const others = [];
 
       unzip(data, {
         // Runs on each central-directory entry BEFORE it is decompressed.
@@ -286,7 +296,10 @@ function extractZip(file) {
           if (name.includes('..') || name.startsWith('/') || /^[a-zA-Z]:/.test(name)) {
             return false;                                        // zip-slip / absolute path
           }
-          if (!MODEL_FILE_RE.test(name)) return false;          // only model assets
+          if (!MODEL_FILE_RE.test(name)) {
+            if (OTHER_MODEL_RE.test(name)) others.push(basename(name).replace(/.*\./, '.'));
+            return false;                                        // only model assets
+          }
 
           const size = f.originalSize || 0;
           if (size > ZIP_MAX_FILE) { aborted = 'A file inside the zip is too large.'; return false; }
@@ -300,8 +313,7 @@ function extractZip(file) {
 
         const files = Object.entries(unzipped).map(([p, bytes]) =>
           new File([bytes], p.split(/[\\/]/).pop())); // keep basename only
-        if (!files.length) return reject(new Error('No model files found in the zip.'));
-        resolve(files);
+        resolve({ files, others: [...new Set(others)] });
       });
     };
     reader.readAsArrayBuffer(file);
@@ -311,14 +323,18 @@ function extractZip(file) {
 // Replace any dropped/selected .zip with its extracted contents.
 async function gatherFiles(inputFiles) {
   const out = [];
+  const others = [];
   for (const f of inputFiles) {
     if (/\.zip$/i.test(f.name)) {
       status('Unzipping…', 'busy', 0);
-      out.push(...await extractZip(f));
+      const r = await extractZip(f);
+      out.push(...r.files);
+      others.push(...r.others);
     } else {
       out.push(f);
     }
   }
+  lastOtherModels = [...new Set(others)];
   return out;
 }
 
@@ -335,6 +351,9 @@ async function loadFromFiles(fileList) {
 
   const objFile = files.find((f) => /\.obj$/i.test(f.name));
   if (!objFile) {
+    if (lastOtherModels.length) {
+      return status(`Archive has no .obj (found ${lastOtherModels.join(', ')}). Only OBJ is supported.`, 'error');
+    }
     return status('No .obj file found.', 'error');
   }
 
@@ -378,14 +397,38 @@ async function proxyText(url) {
   return res.text();
 }
 
+async function proxyBytes(url) {
+  const res = await fetch(proxyURL(url));
+  if (!res.ok) throw new Error(await res.text());
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+// PK\x03\x04 (and empty/spanned variants) — the ZIP local-file-header magic.
+function looksLikeZip(b) {
+  return b.length > 4 && b[0] === 0x50 && b[1] === 0x4b &&
+    (b[2] === 3 || b[2] === 5 || b[2] === 7) && (b[3] === 4 || b[3] === 6 || b[3] === 8);
+}
+
 async function loadFromURL(rawUrl) {
   const url = rawUrl.trim();
   if (!url) return;
   status('Fetching…', 'busy', 0);
   clearBlobUrls();
   try {
-    const objText = await proxyText(url);
-    const objName = basename(url.split('?')[0]) || 'model.obj';
+    const bytes = await proxyBytes(url);
+    const name = basename(url.split(/[?#]/)[0]) || 'model';
+
+    // A remote .zip (by extension or magic bytes) goes through the very same
+    // unzip + material pipeline the file picker uses.
+    if (/\.zip$/i.test(name) || looksLikeZip(bytes)) {
+      status('Unzipping…', 'busy', 0);
+      const zipName = /\.zip$/i.test(name) ? name : 'download.zip';
+      return loadFromFiles([new File([bytes], zipName)]);
+    }
+
+    // Otherwise treat it as a plain OBJ; textures/mtl resolve through the proxy.
+    const objText = new TextDecoder('utf-8').decode(bytes);
+    const objName = /\.obj$/i.test(name) ? name : 'model.obj';
 
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((u) => {
@@ -395,10 +438,7 @@ async function loadFromURL(rawUrl) {
       return safeTextureURL(abs); // http(s) → proxy; file:// etc → blank pixel
     });
 
-    const mtlResolver = async (lib) => {
-      const absMtl = new URL(lib, url).href;
-      return proxyText(absMtl);
-    };
+    const mtlResolver = async (lib) => proxyText(new URL(lib, url).href);
 
     await loadObjWithMaterials({ objText, objName, mtlResolver, manager });
   } catch (err) {

@@ -21,9 +21,38 @@ pinch-zoom and pan.
 |---------------|-----------|----------------------------------------------------------------|
 | `PORT`        | `4182`    | Port to listen on.                                             |
 | `HOST`        | `0.0.0.0` | Bind address. `0.0.0.0` lets a reverse proxy reach it.         |
-| `TRUST_PROXY` | *(unset)* | Set behind a proxy so Express reads `X-Forwarded-*`. `1`, `true`, or a subnet. Leave unset when exposed directly. |
+| `TRUST_PROXY` | *(unset)* | Set behind a proxy so Express reads `X-Forwarded-*` (needed for correct per-IP rate limiting). `1`, `true`, or a subnet. Leave unset when exposed directly. |
+| `DISABLE_PROXY` | *(unset)* | Set to `1` to turn off remote-URL loading entirely (uploads still work). |
+| `PROXY_MAX_BYTES` | `26214400` | Max bytes streamed per fetched resource (25 MB). |
+| `PROXY_RATE_BURST` | `60` | Per-IP burst allowance (one model load = the .mtl + every texture). |
+| `PROXY_RATE_REFILL` | `1` | Per-IP sustained requests/sec after the burst is spent. |
+| `PROXY_MAX_CONCURRENT` | `24` | Global cap on in-flight upstream fetches. |
+| `PROXY_MAX_CONCURRENT_PER_IP` | `8` | Per-IP cap on in-flight fetches (above the browser's ~6). |
+| `PROXY_CONNECT_TIMEOUT_MS` | `8000` | Time-to-headers timeout per hop. |
+| `PROXY_STREAM_TIMEOUT_MS` | `20000` | Whole-request deadline including streaming. |
 
 `GET /healthz` returns `200 ok` for health checks.
+
+### Proxy abuse hardening
+
+`/proxy` is the only server-side surface (uploads/zips are parsed entirely in the
+browser). It is hardened against a bot spamming links to hostile/large files:
+
+- **SSRF:** only `http(s)`; blocks private/loopback/link-local/CGNAT ranges
+  (IPv4 + IPv6, incl. IPv4-mapped and bracketed literals); resolves DNS and
+  checks every address; re-validates each redirect hop.
+- **Rate limit:** per-IP token bucket — allows a normal load's texture burst,
+  caps sustained volume (`429` + `Retry-After`).
+- **Concurrency:** per-IP and global in-flight caps (`429`/`503`).
+- **Size/time:** 25 MB streamed cap per resource (also defuses gzip
+  decompression bombs, since it counts decompressed bytes), plus connect and
+  whole-request deadlines.
+- **Backpressure:** respects the client's read speed so a slow receiver can't
+  balloon server memory. Nothing is buffered to disk or cached.
+- **Kill-switch:** `DISABLE_PROXY=1` removes remote loading altogether.
+
+Set `TRUST_PROXY` behind a reverse proxy so the rate limiter keys on the real
+client IP rather than the proxy's.
 
 ## Behind a reverse proxy
 
@@ -95,6 +124,12 @@ vendor those locally if you need a CDN-free deployment.
 - GIF alpha is 1-bit, so anti-aliased edges are cut at a hard threshold. The
   reference grid is omitted from the GIF automatically.
 - Local files (uploads, zips, folders) are parsed entirely in the browser.
+- A **remote `.zip`** works too: paste the URL and it's fetched (through the
+  hardened proxy) and unzipped in the browser, same as a local one. If an archive
+  has no `.obj`, the app names the unsupported model formats it found (e.g. a
+  `.fbx`/`.dae`-only rip) instead of failing vaguely.
+- OBJ text is normalized (BOM stripped, CR/CRLF line endings) before parsing, so
+  files from various exporters don't silently yield "no geometry".
 - The `proxy` endpoint blocks non-`http(s)` schemes and private/internal
   addresses (SSRF), re-validates redirects, times out, and caps response size.
   Add rate-limiting before exposing it publicly.
