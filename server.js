@@ -165,7 +165,7 @@ async function safeFetch(startUrl) {
 }
 
 // ---- Health check (useful for reverse proxies / orchestrators) --------------
-app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
+app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
 
 // ---- Proxy endpoint ---------------------------------------------------------
 app.get('/proxy', async (req, res) => {
