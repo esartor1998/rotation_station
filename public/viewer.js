@@ -21,7 +21,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
-// Lighting — a soft key/fill so an untextured mesh still reads as a solid.
+// Lighting, a soft key/fill so an untextured mesh still reads as a solid.
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202028, 1.1));
 const key = new THREE.DirectionalLight(0xffffff, 1.6);
 key.position.set(3, 5, 4);
@@ -61,7 +61,7 @@ const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, size: 48
 // "Rotation speed" sets how long one full turn takes; "smoothness" sets the
 // per-frame delay. Frames-per-rotation is then frames = round(turnSec / delay),
 // so a smoother GIF (shorter delay) adds frames but the turn still takes the
-// same time — the spin speed stays put.
+// same time, the spin speed stays put.
 const SPEED_PRESETS = [ // seconds per full 360° turn (ascending speed)
   { label: 'Slow', turnSec: 4.0 },
   { label: 'Medium', turnSec: 2.5 },
@@ -94,7 +94,7 @@ let lastFrameT = performance.now();
 const nativeRAF = window.requestAnimationFrame.bind(window);
 
 // ---------------------------------------------------------------------------
-// Loading — shared core
+// Loading, shared core
 // ---------------------------------------------------------------------------
 
 // Pull every filename referenced by `mtllib` lines out of the OBJ text.
@@ -105,10 +105,10 @@ function extractMtlLibs(objText) {
   while ((m = lineRe.exec(objText))) {
     const rest = m[1].trim();
     // One mtllib line may list several .mtl files, and any name may contain
-    // spaces — so split on the .mtl extension boundary, not on whitespace.
+    // spaces, so split on the .mtl extension boundary, not on whitespace.
     const names = rest.match(/\S.*?\.mtl(?=\s|$)/gi);
     if (names) names.forEach((n) => libs.push(n.trim()));
-    else if (rest) libs.push(rest); // reference without a .mtl extension — take it whole
+    else if (rest) libs.push(rest); // reference without a .mtl extension, take it whole
   }
   return [...new Set(libs)];
 }
@@ -117,7 +117,7 @@ const basename = (p) => p.split(/[\\/]/).pop();
 
 // Build a same-origin proxy URL *relative to wherever the app is mounted*, so it
 // keeps working behind a reverse proxy at a sub-path (e.g. /rotation-station/).
-// Requires the page to be served with a trailing slash — see the deploy notes.
+// Requires the page to be served with a trailing slash, see the deploy notes.
 function proxyURL(target) {
   const u = new URL('proxy', document.baseURI);
   u.searchParams.set('url', target);
@@ -125,7 +125,7 @@ function proxyURL(target) {
 }
 
 // A 1×1 transparent PNG. Returned instead of ever handing a loader a file:// or
-// bare OS path — browsers refuse to load those from an http(s) page ("may not
+// bare OS path, browsers refuse to load those from an http(s) page ("may not
 // load or link to file:///"), so we swap in a harmless pixel instead.
 const BLANK_PIXEL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -140,7 +140,7 @@ function safeTextureURL(resolvedAbsolute) {
 // manager is a THREE.LoadingManager whose URL modifier routes texture requests
 // to blob URLs (uploads) or the /proxy endpoint (web).
 async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) {
-  // Strip a UTF-8 BOM and normalize CR / CRLF line endings — OBJLoader splits on
+  // Strip a UTF-8 BOM and normalize CR / CRLF line endings, OBJLoader splits on
   // "\n" only, so a lone-CR file (some exporters) would parse as one line → no
   // geometry. Do it once here so every load path benefits.
   objText = objText.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
@@ -155,7 +155,7 @@ async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) 
       try {
         const t = await mtlResolver(lib);
         if (t) texts.push(t);
-      } catch { /* missing .mtl — fall back to default material */ }
+      } catch { /* missing .mtl, fall back to default material */ }
     }
     if (texts.length) {
       const mtlLoader = new MTLLoader(manager);
@@ -179,7 +179,7 @@ async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) 
 }
 
 // ---------------------------------------------------------------------------
-// Multi-format loading — dispatch to the right three.js loader by extension.
+// Multi-format loading, dispatch to the right three.js loader by extension.
 // Loaders are imported lazily (via the CDN import map) so they cost nothing
 // until a model of that type is actually opened.
 // ---------------------------------------------------------------------------
@@ -238,7 +238,7 @@ function finishScene(scene, name) {
   installModel(scene, name, {});
 }
 
-// A loader that returns bare geometry (STL, PLY) — wrap it in a mesh.
+// A loader that returns bare geometry (STL, PLY), wrap it in a mesh.
 function finishGeometry(geo, name, preferVertexColors) {
   if (!geo || !geo.getAttribute('position')) {
     return status('No geometry found in that file.', 'error');
@@ -284,7 +284,7 @@ function installModel(object, name, materialInfo = {}) {
   });
 
   // Center the bounding box on the pivot origin, then scale so the largest
-  // dimension is ~2 world units — frames any model consistently.
+  // dimension is ~2 world units, frames any model consistently.
   const box = new THREE.Box3().setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
@@ -305,7 +305,7 @@ function installModel(object, name, materialInfo = {}) {
   document.getElementById('hud-tris').textContent = Math.round(triangles).toLocaleString();
 
   const { requested = 0, loaded = 0 } = materialInfo;
-  if (requested && !loaded) status(`Loaded ${name} — .mtl not found, using default material`, 'ok');
+  if (requested && !loaded) status(`Loaded ${name}, .mtl not found, using default material`, 'ok');
   else if (loaded) status(`Loaded ${name} with materials`, 'ok');
   else status(`Loaded ${name}`, 'ok');
 }
@@ -334,17 +334,17 @@ function clearBlobUrls() {
 }
 
 // ---------------------------------------------------------------------------
-// Zip handling — extract .obj/.mtl/textures in the browser, with guards
+// Zip handling, extract .obj/.mtl/textures in the browser, with guards
 // ---------------------------------------------------------------------------
 // Limits are enforced against the zip's *declared* sizes before decompression,
 // so a decompression bomb never gets expanded. Names are sanitised against
-// zip-slip. Everything stays client-side — nothing is written to disk.
+// zip-slip. Everything stays client-side, nothing is written to disk.
 const ZIP_MAX_INPUT = 150 * 1024 * 1024;        // reject a zip file bigger than this
 const ZIP_MAX_TOTAL = 300 * 1024 * 1024;        // cap total uncompressed bytes
 const ZIP_MAX_FILE = 150 * 1024 * 1024;         // cap any single uncompressed file
 const ZIP_MAX_ENTRIES = 5000;
 const MODEL_FILE_RE = /\.(obj|mtl|dae|gltf|glb|stl|ply|fbx|bin|png|jpe?g|bmp|gif|webp|tga|dds|ktx2)$/i;
-// Recognised 3D formats we still DON'T support — used only to give a helpful
+// Recognised 3D formats we still DON'T support, used only to give a helpful
 // message when a zip has models but none we can open.
 const OTHER_MODEL_RE = /\.(blend|3ds|smd|pmx|pmd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x|usd[acz]?)$/i;
 let lastOtherModels = []; // unsupported model formats seen in the last archive
@@ -415,7 +415,7 @@ async function gatherFiles(inputFiles) {
 }
 
 // ---------------------------------------------------------------------------
-// Loading — local files (.obj + .mtl + textures, or a .zip of them)
+// Loading, local files (.obj + .mtl + textures, or a .zip of them)
 // ---------------------------------------------------------------------------
 async function loadFromFiles(fileList) {
   let files;
@@ -469,7 +469,7 @@ async function loadFromFiles(fileList) {
 }
 
 // ---------------------------------------------------------------------------
-// Loading — remote URL (.obj, its .mtl, and textures via the proxy)
+// Loading, remote URL (.obj, its .mtl, and textures via the proxy)
 // ---------------------------------------------------------------------------
 async function proxyText(url) {
   const res = await fetch(proxyURL(url));
@@ -483,7 +483,7 @@ async function proxyBytes(url) {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-// PK\x03\x04 (and empty/spanned variants) — the ZIP local-file-header magic.
+// PK\x03\x04 (and empty/spanned variants), the ZIP local-file-header magic.
 function looksLikeZip(b) {
   return b.length > 4 && b[0] === 0x50 && b[1] === 0x4b &&
     (b[2] === 3 || b[2] === 5 || b[2] === 7) && (b[3] === 4 || b[3] === 6 || b[3] === 8);
@@ -527,7 +527,7 @@ async function loadFromURL(rawUrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Interaction — works with mouse and touch through Pointer Events:
+// Interaction, works with mouse and touch through Pointer Events:
 //   • 1 pointer drag           → rotate  (ctrl/⌘/right-drag → pan)
 //   • 2 pointers (touch)       → pinch to zoom + two-finger pan
 //   • wheel / arrow keys       → zoom / move  (desktop)
@@ -685,7 +685,7 @@ function status(msg, kind = 'ok', hideAfter = 2600) {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // ---------------------------------------------------------------------------
-// Turntable — the orientation used by both the live preview and the GIF
+// Turntable, the orientation used by both the live preview and the GIF
 // ---------------------------------------------------------------------------
 // The model is tilted by (pitch, roll), then spun a full 360° about the world
 // vertical. A full turn returns to the start, so frame 0 == frame N and the GIF
@@ -706,7 +706,7 @@ function applyOrientation(p) {
 }
 
 // ---------------------------------------------------------------------------
-// GIF capture (gifenc — small, worker-free, supports 1-bit alpha transparency)
+// GIF capture (gifenc, small, worker-free, supports 1-bit alpha transparency)
 // ---------------------------------------------------------------------------
 function enterCaptureResolution(size) {
   const prev = new THREE.Vector2();
@@ -760,7 +760,7 @@ function readCanvasRGBA(src) {
 // Copy a rectangular sub-region out of a full-frame RGBA buffer.
 function cropRGBA(data, srcW, rect) {
   if (rect.x === 0 && rect.y === 0 && rect.w === srcW && rect.h * srcW * 4 === data.length) {
-    return data; // already the whole frame — no copy needed
+    return data; // already the whole frame, no copy needed
   }
   const out = new Uint8ClampedArray(rect.w * rect.h * 4);
   const rowBytes = rect.w * 4;
@@ -785,7 +785,7 @@ const ALPHA_THRESHOLD = 8;  // matches the GIF's 1-bit alpha cut
 const CROP_PAD = 1;         // keep a hair of margin around the content
 const SAMPLE_FRAMES = 12;   // frames sampled to build the shared palette
 
-// Everything below runs entirely in the browser — the generated GIF is never
+// Everything below runs entirely in the browser, the generated GIF is never
 // uploaded, so this optimization adds zero server attack surface (the secure
 // option by construction; no shelling out to gifsicle on untrusted data).
 async function recordGif() {
@@ -1031,7 +1031,7 @@ window.addEventListener('drop', (e) => {
   drop.classList.remove('show');
   const dt = e.dataTransfer;
 
-  // Grab directory entries synchronously — they expire after the first await.
+  // Grab directory entries synchronously, they expire after the first await.
   let entries = null;
   if (dt.items && dt.items.length && dt.items[0].webkitGetAsEntry) {
     entries = [];

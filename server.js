@@ -15,7 +15,7 @@ const app = express();
 app.disable('x-powered-by');
 
 // Behind a reverse proxy, set TRUST_PROXY (e.g. TRUST_PROXY=1, or a subnet) so
-// Express reads X-Forwarded-* correctly. Leave it unset when exposed directly —
+// Express reads X-Forwarded-* correctly. Leave it unset when exposed directly,
 // trusting these headers without a proxy in front lets clients spoof their IP.
 if (process.env.TRUST_PROXY) {
   const tp = process.env.TRUST_PROXY;
@@ -57,7 +57,7 @@ const PROXY_DISABLED = /^(1|true|yes)$/i.test(process.env.DISABLE_PROXY || '');
 // ---- Abuse controls ---------------------------------------------------------
 // The proxy fetches attacker-influenceable URLs, so a flood of requests is the
 // main non-SSRF risk (bandwidth amplification / DoS). A per-IP token bucket
-// allows a normal model load — which bursts the .mtl + every texture at once —
+// allows a normal model load, which bursts the .mtl + every texture at once,
 // while capping sustained volume. Concurrency caps sit above the browser's own
 // ~6-connection limit so legit loads pass but sockets/memory stay bounded.
 const RL_BURST = Number(process.env.PROXY_RATE_BURST) || 60;          // burst allowance / IP
@@ -140,7 +140,7 @@ async function assertSafeUrl(raw) {
 }
 
 // Follow redirects manually so each hop is re-validated (a public URL can 302 to
-// an internal one — automatic redirects would sail right past the IP check).
+// an internal one, automatic redirects would sail right past the IP check).
 async function safeFetch(startUrl) {
   let target = startUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {

@@ -1,9 +1,9 @@
 # Rotation Station
 
 A sorta interactive three.js model viewer. Can load a file, a `.zip`, a folder, or a URL;
-inspect it; and always exports a smooth, seamlessly-looping rotating **GIF**.
+inspect it; and always exports a smooth, seamlessly-looping rotating GIF.
 
-supported formats: **.obj** (+`.mtl`), **.dae** (Collada), **.gltf/.glb**,
+Supported formats: **.obj** (+`.mtl`), **.dae** (Collada), **.gltf/.glb**,
 **.stl**, **.ply**, and **.fbx**, each with their associated textures.
 
 ## Run
@@ -13,7 +13,7 @@ npm install
 npm start          # http://localhost:4182
 ```
 
-load a model (Open files / drag-drop a `.zip` or folder / paste a URL), open the
+Load a model (Open files / drag-drop a `.zip` or folder / paste a URL), open the
 **GIF turntable** panel, pick a **Rotation speed** and **Smoothness**, tweak pitch
 and roll, then **Record GIF**. on a touchscreen, one finger rotates, two fingers
 pinch-zoom and pan.
@@ -45,7 +45,7 @@ browser). Somewhat hardened against a bot spamming links to hostile/large files:
   (IPv4 + IPv6, incl. IPv4-mapped and bracketed literals); resolves DNS and
   checks every address; re-validates each redirect hop
 - **Rate limit:** per-IP token bucket
-- **Concurrency:** per-IP and global in-flight caps (`429`/`503`).
+- **Concurrency:** per-IP and global in-flight caps (`429`/`503`)
 - **Size/time:** 25 MB streamed cap per resource, has connect and whole-request deadlines
 - **Backpressure:** respects the client's read speed
 
@@ -57,7 +57,7 @@ client IP rather than the proxy's!
 The app works both at a domain root and at a sub-path, just please redirect the slash-less form.
 Run the app with `TRUST_PROXY=1` when a proxy sits in front.
 
-### nginx — sub-path
+### nginx:  sub-path
 
 ```nginx
 location = /rotation-station { return 301 /rotation-station/; }   # enforce trailing slash
@@ -69,7 +69,7 @@ location /rotation-station/ {
 }
 ```
 
-### nginx — root
+### nginx:  root
 
 ```nginx
 location / {
@@ -80,7 +80,7 @@ location / {
 }
 ```
 
-### Caddy — sub-path
+### Caddy:  sub-path
 
 ```
 example.com {
