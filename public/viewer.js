@@ -100,10 +100,15 @@ const nativeRAF = window.requestAnimationFrame.bind(window);
 // Pull every filename referenced by `mtllib` lines out of the OBJ text.
 function extractMtlLibs(objText) {
   const libs = [];
-  const re = /^\s*mtllib\s+(.+)$/gim;
+  const lineRe = /^\s*mtllib\s+(.+)$/gim;
   let m;
-  while ((m = re.exec(objText))) {
-    m[1].trim().split(/\s+/).forEach((n) => n && libs.push(n));
+  while ((m = lineRe.exec(objText))) {
+    const rest = m[1].trim();
+    // One mtllib line may list several .mtl files, and any name may contain
+    // spaces — so split on the .mtl extension boundary, not on whitespace.
+    const names = rest.match(/\S.*?\.mtl(?=\s|$)/gi);
+    if (names) names.forEach((n) => libs.push(n.trim()));
+    else if (rest) libs.push(rest); // reference without a .mtl extension — take it whole
   }
   return [...new Set(libs)];
 }
