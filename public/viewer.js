@@ -52,31 +52,37 @@ let baseDistance = 5;      // camera Z that framed the model at zoom = 1
 let activeBlobUrls = [];   // object URLs for uploaded textures, revoked on reload
 
 // Turntable / GIF settings, driven by the tuning panel.
-const settings = { frames: 60, fps: 30, pitch: 20, roll: 0, size: 480, transparent: true, optimize: true };
+// delayCs (centiseconds per frame) is the source of truth for timing; fps is a
+// display value. Deriving frames from the *actual* delay keeps the loop duration
+// exact, and keeping delays ≥ 3cs avoids the browser clamp that bumps tiny GIF
+// delays toward 100ms (which is what made smoother = slower before).
+const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, size: 480, transparent: true, optimize: true };
 
-// The two easy presets. "Rotation speed" sets how long one full turn takes;
-// "smoothness" sets the playback fps. Frames-per-rotation is then derived
-// (frames = fps × turnSec), so a smoother GIF adds frames *without* slowing the
-// spin — which is exactly the balance users were struggling to strike by hand.
+// "Rotation speed" sets how long one full turn takes; "smoothness" sets the
+// per-frame delay. Frames-per-rotation is then frames = round(turnSec / delay),
+// so a smoother GIF (shorter delay) adds frames but the turn still takes the
+// same time — the spin speed stays put.
 const SPEED_PRESETS = [ // seconds per full 360° turn (ascending speed)
   { label: 'Slow', turnSec: 4.0 },
   { label: 'Medium', turnSec: 2.5 },
   { label: 'Fast', turnSec: 1.5 },
-  { label: 'Turbo', turnSec: 0.8 },
+  { label: 'Turbo', turnSec: 0.9 },
 ];
-const SMOOTH_PRESETS = [ // playback fps (ascending smoothness)
-  { label: 'Basic', fps: 12 },
-  { label: 'Smooth', fps: 20 },
-  { label: 'Silky', fps: 30 },
-  { label: 'Ultra', fps: 48 },
+const SMOOTH_PRESETS = [ // centiseconds per frame (ascending smoothness ≈ fps)
+  { label: 'Basic', delayCs: 8 },   // ~12 fps
+  { label: 'Smooth', delayCs: 5 },  // 20 fps
+  { label: 'Silky', delayCs: 4 },   // 25 fps
+  { label: 'Ultra', delayCs: 3 },   // ~33 fps
 ];
 let speedIdx = 1;   // Medium
 let smoothIdx = 2;  // Silky
 
 function applyPresets() {
   const turnSec = SPEED_PRESETS[speedIdx].turnSec;
-  settings.fps = SMOOTH_PRESETS[smoothIdx].fps;
-  settings.frames = Math.min(240, Math.max(8, Math.round(settings.fps * turnSec)));
+  const delayCs = SMOOTH_PRESETS[smoothIdx].delayCs;
+  settings.delayCs = delayCs;
+  settings.frames = Math.min(300, Math.max(8, Math.round((turnSec * 100) / delayCs)));
+  settings.fps = Math.round(100 / delayCs); // display only
   syncReadouts();
 }
 let spinning = false;      // live preview spin
@@ -665,7 +671,9 @@ async function recordGif() {
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
   const { frames, size, fps, transparent, optimize } = settings;
-  const delay = Math.max(1, Math.round(100 / fps)); // GIF delay is in centiseconds
+  // gifenc's writeFrame takes delay in MILLISECONDS (it stores round(ms/10) as
+  // centiseconds). Our timing source of truth is delayCs, so ×10 to hand it ms.
+  const delayMs = Math.max(10, settings.delayCs * 10);
   const format = transparent ? 'rgba4444' : 'rgb565';
 
   renderer.setAnimationLoop(null);          // take over the loop during capture
@@ -756,7 +764,7 @@ async function recordGif() {
       const index = applyPalette(data, framePalette, format);
       // A palette on a frame writes a colour table. For the global palette that's
       // only needed on frame 0; per-frame palettes write one on every frame.
-      const opts = { delay, transparent, transparentIndex: 0 };
+      const opts = { delay: delayMs, transparent, transparentIndex: 0 };
       if (!palette || i === 0) opts.palette = framePalette;
       gif.writeFrame(index, rect.w, rect.h, opts);
       setCapProgress(p2start + (i + 1) / frames * p2span);
@@ -791,7 +799,7 @@ function syncReadouts() {
   el('pitchVal').textContent = settings.pitch + '\u00b0';
   el('rollVal').textContent = settings.roll + '\u00b0';
   el('sizeVal').textContent = settings.size + 'px';
-  el('loopVal').textContent = (settings.frames / settings.fps).toFixed(2) + ' s';
+  el('loopVal').textContent = ((settings.frames * settings.delayCs) / 100).toFixed(2) + ' s';
   el('framesVal').textContent = settings.frames;
   el('fpsVal').textContent = settings.fps;
   el('framesManVal').textContent = settings.frames;
@@ -820,7 +828,11 @@ function bindRange(id, key, poseAffecting) {
 bindRange('pitch', 'pitch', true);
 bindRange('roll', 'roll', true);
 bindRange('frames', 'frames', false); // manual mode only (hidden unless Advanced)
-bindRange('fps', 'fps', false);
+el('fps').addEventListener('input', () => {
+  settings.fps = Number(el('fps').value);
+  settings.delayCs = Math.max(1, Math.round(100 / settings.fps)); // keep timing in sync
+  syncReadouts();
+});
 
 function bindSeg(segId, onPick) {
   el(segId).addEventListener('click', (e) => {
@@ -935,7 +947,10 @@ function renderLoop() {
   const now = performance.now();
   if (spinning && !capturing) {
     const dt = (now - lastFrameT) / 1000;
-    phase = (phase + (settings.fps / settings.frames) * dt) % 1; // preview matches GIF speed
+    // Rotations per second the exported GIF will actually play at:
+    // frames × delayCs centiseconds per full turn.
+    const rps = 100 / (settings.frames * settings.delayCs);
+    phase = (phase + rps * dt) % 1;
     applyOrientation(phase);
     updateHUD();
   }
