@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Rotation Station</title>
 
-<!-- Three.js, fflate (zip), and gifenc (transparent GIF encoder) load from a
-     CDN via the import map below. Vendor them locally for a CDN-free deploy. -->
+<!-- three.js, fflate (for zips) and gifenc (the transparent GIF encoder) all
+     come from a CDN via the import map below. grab them locally if you want a
+     CDN-free deploy. -->
 <script type="importmap">
 {
   "imports": {
@@ -26,7 +27,7 @@
     --line:      #2a2f38;
     --text:      #e6e9ee;
     --muted:     #808a98;
-    --accent:    #ffc24b;   /* signal amber, the one loud thing */
+    --accent:    #ffc24b;   /* signal amber, the one loud colour */
     --accent-dim:#5a4a24;
     --danger:    #ff6b6b;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -44,7 +45,7 @@
     overflow: hidden;
   }
 
-  /* ---- Control rail -------------------------------------------------------- */
+  /* ---- the control rail at the top ----------------------------------------- */
   #rail {
     position: fixed;
     inset: 0 0 auto 0;
@@ -111,11 +112,11 @@
 
   #file { display: none; }
 
-  /* ---- Viewport ------------------------------------------------------------ */
+  /* ---- the viewport -------------------------------------------------------- */
   #stage { position: fixed; inset: 0; }
   canvas { display: block; touch-action: none; }
 
-  /* ---- Telemetry HUD (the signature element) ------------------------------- */
+  /* ---- the little telemetry readout ---------------------------------------- */
   #hud {
     position: fixed;
     left: 14px;
@@ -140,7 +141,7 @@
   #hud .name { color: var(--accent); }
   #hud .sep { height: 1px; background: var(--line); margin: 6px 0; }
 
-  /* ---- Help legend --------------------------------------------------------- */
+  /* ---- the controls legend ------------------------------------------------- */
   #legend {
     position: fixed;
     right: 14px;
@@ -164,7 +165,7 @@
     padding: 1px 6px;
   }
 
-  /* ---- Status toast -------------------------------------------------------- */
+  /* ---- status toast -------------------------------------------------------- */
   #status {
     position: fixed;
     top: 62px; left: 50%;
@@ -185,7 +186,7 @@
   #status.error { border-color: var(--danger); color: var(--danger); }
   #status.busy  { border-color: var(--accent); color: var(--accent); }
 
-  /* ---- Drop overlay -------------------------------------------------------- */
+  /* ---- the drag-and-drop overlay ------------------------------------------- */
   #drop {
     position: fixed; inset: 0; z-index: 20;
     display: none;
@@ -197,7 +198,7 @@
   }
   #drop.show { display: flex; }
 
-  /* ---- Rotation Station tuning panel --------------------------------------- */
+  /* ---- the tuning panel ---------------------------------------------------- */
   #panel {
     position: fixed;
     top: 62px; right: 14px;
@@ -233,7 +234,7 @@
   .advbtn:hover { border-color: var(--accent); }
   .advbtn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
 
-  /* Presets by default; manual sliders when the panel is in advanced mode. */
+  /* presets normally, manual sliders once advanced mode is on. */
   #panel .manual-ctl { display: none; }
   #panel.advanced .preset-ctl { display: none; }
   #panel.advanced .manual-ctl { display: grid; }
@@ -288,7 +289,7 @@
     #panel { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
   }
 
-  /* ---- Capture overlay ----------------------------------------------------- */
+  /* ---- the overlay shown while recording ----------------------------------- */
   #capture {
     position: fixed; inset: 0; z-index: 30;
     display: none; flex-direction: column;

@@ -7,24 +7,25 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Host/port are configurable for deployment; defaults suit local use.
+// host/port are configurable for deployment, the defaults are fine locally
 const PORT = Number(process.env.PORT) || 4182;
 const HOST = process.env.HOST || '0.0.0.0'; // 0.0.0.0 so a reverse proxy can reach it
 
 const app = express();
 app.disable('x-powered-by');
 
-// Behind a reverse proxy, set TRUST_PROXY (e.g. TRUST_PROXY=1, or a subnet) so
-// Express reads X-Forwarded-* correctly. Leave it unset when exposed directly,
-// trusting these headers without a proxy in front lets clients spoof their IP.
+// behind a reverse proxy, set TRUST_PROXY (e.g. TRUST_PROXY=1, or a subnet) so
+// Express reads X-Forwarded-* properly. leave it unset if the app is exposed
+// directly: trusting those headers with no proxy in front lets anyone spoof
+// their IP, which would let them dodge the rate limit
 if (process.env.TRUST_PROXY) {
   const tp = process.env.TRUST_PROXY;
   app.set('trust proxy', tp === 'true' ? true : /^\d+$/.test(tp) ? Number(tp) : tp);
 }
 
-// ---- Locate the static files ------------------------------------------------
-// Prefer a ./public folder, but fall back to the server's own directory so the
-// app still runs if the files were downloaded flat (index.html next to this).
+// ---- find the static files --------------------------------------------------
+// prefer a ./public folder, but fall back to this file's own directory so the
+// app still runs if everything got downloaded flat (index.html next to this)
 const PUBLIC_DIR = fs.existsSync(path.join(__dirname, 'public', 'index.html'))
   ? path.join(__dirname, 'public')
   : __dirname;
@@ -40,13 +41,13 @@ if (!fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) {
 
 app.use(express.static(PUBLIC_DIR));
 
-// ---- Proxy hardening --------------------------------------------------------
-// The viewer routes the .obj, its .mtl, AND every texture the .mtl names through
-// this endpoint. Those texture/mtl URLs come from an untrusted model file, not
-// from the user typing them, so the proxy must defend against SSRF: a malicious
-// model could otherwise point the URLs at internal services, cloud metadata
-// (169.254.169.254), localhost, etc. We therefore block private address ranges,
-// re-validate every redirect hop, time out, and cap the response size.
+// ---- proxy hardening --------------------------------------------------------
+// the viewer sends the model, its .mtl and every texture the .mtl names through
+// here. those URLs come out of an untrusted model file rather than from someone
+// typing them, so this has to defend against SSRF: otherwise a nasty model could
+// point them at localhost, internal services, or cloud metadata
+// (169.254.169.254) and read back the response. so we block private address
+// ranges, re-check every redirect hop, time out, and cap the response size
 const MAX_BYTES = Number(process.env.PROXY_MAX_BYTES) || 25 * 1024 * 1024; // 25 MB per resource
 const FETCH_TIMEOUT_MS = Number(process.env.PROXY_CONNECT_TIMEOUT_MS) || 8000;   // per hop, to headers
 const STREAM_DEADLINE_MS = Number(process.env.PROXY_STREAM_TIMEOUT_MS) || 20000; // whole request
@@ -54,12 +55,13 @@ const MAX_REDIRECTS = 4;
 const MAX_URL_LENGTH = 2048;
 const PROXY_DISABLED = /^(1|true|yes)$/i.test(process.env.DISABLE_PROXY || '');
 
-// ---- Abuse controls ---------------------------------------------------------
-// The proxy fetches attacker-influenceable URLs, so a flood of requests is the
-// main non-SSRF risk (bandwidth amplification / DoS). A per-IP token bucket
-// allows a normal model load, which bursts the .mtl + every texture at once,
-// while capping sustained volume. Concurrency caps sit above the browser's own
-// ~6-connection limit so legit loads pass but sockets/memory stay bounded.
+// ---- abuse controls ---------------------------------------------------------
+// the proxy fetches URLs an attacker picks, so past SSRF the main risk is just
+// volume: someone spamming links to huge files to chew up our bandwidth. a
+// per-IP token bucket lets a normal load through (which fires the .mtl plus
+// every texture at once) while capping sustained traffic. the concurrency caps
+// sit above the browser's own ~6 connections, so real loads pass but sockets
+// and memory stay bounded
 const RL_BURST = Number(process.env.PROXY_RATE_BURST) || 60;          // burst allowance / IP
 const RL_REFILL_PER_SEC = Number(process.env.PROXY_RATE_REFILL) || 1; // sustained req/s / IP
 const MAX_CONCURRENT = Number(process.env.PROXY_MAX_CONCURRENT) || 24;         // global in-flight
@@ -69,7 +71,7 @@ const buckets = new Map();        // ip -> { tokens, last }
 const inFlightPerIp = new Map();  // ip -> count
 let inFlight = 0;
 
-// Returns 0 if allowed, else Retry-After seconds.
+// returns 0 if allowed, otherwise the Retry-After value in seconds
 function takeToken(ip) {
   const now = Date.now();
   let b = buckets.get(ip);
@@ -81,7 +83,7 @@ function takeToken(ip) {
   return 0;
 }
 
-// Prune idle buckets so the map can't grow without bound under IP rotation.
+// drop idle buckets so the map can't grow forever if someone rotates IPs
 setInterval(() => {
   const now = Date.now();
   for (const [ip, b] of buckets) {
@@ -112,10 +114,10 @@ function isPrivateAddress(ip) {
     if (mapped) return isPrivateAddress(mapped[1]);
     return false;
   }
-  return true; // not a recognizable IP → treat as unsafe
+  return true; // not an IP we recognise, so treat it as unsafe
 }
 
-// Reject non-http(s) schemes and any host that resolves to a private address.
+// reject anything that isn't http(s), or that resolves to a private address
 async function assertSafeUrl(raw) {
   let url;
   try { url = new URL(raw); } catch { throw new Error('Invalid URL'); }
@@ -139,8 +141,9 @@ async function assertSafeUrl(raw) {
   return url;
 }
 
-// Follow redirects manually so each hop is re-validated (a public URL can 302 to
-// an internal one, automatic redirects would sail right past the IP check).
+// follow redirects by hand so every hop gets re-checked. a public URL can 302
+// to an internal one, and automatic redirects would sail straight past the IP
+// check
 async function safeFetch(startUrl) {
   let target = startUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -164,10 +167,10 @@ async function safeFetch(startUrl) {
   throw new Error('Too many redirects');
 }
 
-// ---- Health check (useful for reverse proxies / orchestrators) --------------
+// ---- health check, handy for reverse proxies and orchestrators --------------
 app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
 
-// ---- Proxy endpoint ---------------------------------------------------------
+// ---- the proxy endpoint itself ----------------------------------------------
 app.get('/proxy', async (req, res) => {
   if (PROXY_DISABLED) return res.status(403).send('Remote URL loading is disabled.');
 
@@ -176,14 +179,14 @@ app.get('/proxy', async (req, res) => {
   if (typeof target !== 'string') return res.status(400).send('Pass a "url" query parameter.');
   if (target.length > MAX_URL_LENGTH) return res.status(414).send('URL too long.');
 
-  // Per-IP rate limit (token bucket: allows a model's texture burst, caps floods).
+  // per-IP rate limit. the token bucket allows a model's texture burst but caps floods
   const retryAfter = takeToken(ip);
   if (retryAfter) {
     res.set('Retry-After', String(retryAfter));
     return res.status(429).send('Rate limit exceeded. Slow down.');
   }
 
-  // Concurrency caps bound sockets/bandwidth without blocking a normal load.
+  // concurrency caps keep sockets and bandwidth bounded without blocking a normal load
   if (inFlight >= MAX_CONCURRENT) {
     res.set('Retry-After', '2');
     return res.status(503).send('Server busy, retry shortly.');
@@ -210,7 +213,7 @@ app.get('/proxy', async (req, res) => {
       return res.status(413).send('Remote file exceeds size limit.');
     }
 
-    // Forward the real content type so images and text both work downstream.
+    // pass the real content type through so images and text both work downstream
     res.set('Content-Type', upstream.headers.get('content-type') || 'application/octet-stream');
     res.set('Cache-Control', 'no-store');
     res.set('X-Content-Type-Options', 'nosniff');
@@ -218,10 +221,10 @@ app.get('/proxy', async (req, res) => {
 
     if (!upstream.body) return res.end();
 
-    // Stream with a hard byte cap AND a whole-request deadline, respecting client
-    // backpressure so neither an oversized/endless upstream nor a slow client can
-    // exhaust memory. (The byte cap also defuses gzip decompression bombs, since
-    // it counts decompressed bytes as they arrive.)
+    // stream with a hard byte cap and a whole-request deadline, and respect the
+    // client's backpressure, so neither a huge/endless upstream nor a slow
+    // reader can eat all our memory. the byte cap also kills gzip bombs, since
+    // it counts bytes after decompression as they arrive
     reader = upstream.body.getReader();
     let total = 0;
     for (;;) {
