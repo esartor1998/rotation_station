@@ -469,7 +469,7 @@
       </div>
       <div class="ctl">
         <div class="lbl"><span>Roll</span><span class="val" id="rollVal">0°</span></div>
-        <input id="roll" type="range" min="-45" max="45" step="1" value="0" />
+        <input id="roll" type="range" min="-90" max="90" step="1" value="0" />
       </div>
       <div class="ctl">
         <div class="lbl"><span>Bob amplitude</span><span class="val" id="bobAmpVal">0.00</span></div>
@@ -525,6 +525,11 @@
             <button data-opt="1" class="on">On</button>
             <button data-opt="0">Off</button>
           </div>
+        </div>
+        <div class="ctl" id="sampleCtl">
+          <div class="lbl"><span>Palette sampling</span><span class="val" id="sampleFracVal">20%</span></div>
+          <input id="sampleFrac" type="range" min="5" max="100" step="5" value="20"
+                 title="how much of the loop gets sampled to build the shared palette. higher catches more colour but takes longer to encode" />
         </div>
       </div>
       <div class="readout">

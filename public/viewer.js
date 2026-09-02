@@ -78,7 +78,7 @@ let loadGeneration = 0;    // bumped each load, so a stale async callback can be
 // the loop length exact, and staying at 3cs or more dodges the browser clamp
 // that bumps tiny GIF delays up toward 100ms. that clamp is what used to make
 // "smoother" come out slower
-const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, bg: 'transparent', optimize: true, bobAmp: 0, bobCycles: 1, format: 'gif' };
+const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, bg: 'transparent', optimize: true, sampleFraction: 0.2, bobAmp: 0, bobCycles: 1, format: 'gif' };
 
 // "rotation speed" sets how long one full turn takes, "smoothness" sets the
 // per-frame delay. the frame count is then round(turnSec / delay), so a
@@ -997,7 +997,6 @@ function compositeOverBackground(fg, bg) {
 
 const ALPHA_THRESHOLD = 8;  // matches where the GIF's 1-bit alpha cuts off
 const CROP_PAD = 1;         // leave a hair of margin around the content
-const SAMPLE_FRAMES = 12;   // how many frames we sample to build the shared palette
 
 // all of this runs in the browser and the GIF never gets uploaded, so none of
 // it adds any server attack surface. that's deliberate: no shelling out to
@@ -1055,13 +1054,24 @@ async function recordGif() {
     const needSample = optimize && !isApng;   // palette sampling is GIF-only, APNG stays truecolour
     const pass1 = needBBox || needSample;
 
+    // how many frames feed the shared palette, spread evenly across the loop.
+    // too few and a colour that only shows up between samples (a highlight
+    // sweeping past, say) gets a bad nearest-match and flickers against its
+    // neighbours once encoding hits it for real. the manual percentage slider
+    // is Exp. Mode only; everyone else gets a sane frame-count-aware default
+    // capped at 12 samples, so a short loop doesn't oversample and a long one
+    // doesn't undersample
+    const sampleFrames = el('panel').classList.contains('advanced')
+      ? Math.max(2, Math.min(frames, Math.round(frames * settings.sampleFraction)))
+      : Math.max(1, Math.min(12, frames, Math.round(frames * 0.2)));
+
     if (pass1) {
       let minX = size, minY = size, maxX = -1, maxY = -1;
-      const stride = Math.max(1, Math.floor(frames / SAMPLE_FRAMES));
+      const stride = Math.max(1, Math.floor(frames / sampleFrames));
       const samples = []; // kept full-frame, cropped later
 
       for (let i = 0; i < frames; i++) {
-        const isSample = needSample && i % stride === 0 && samples.length < SAMPLE_FRAMES;
+        const isSample = needSample && i % stride === 0 && samples.length < sampleFrames;
         if (needBBox || isSample) {
           renderFrame(i);
           const img = readCanvasRGBA(renderer.domElement);
@@ -1181,6 +1191,7 @@ function syncReadouts() {
   el('scaleVal').textContent = settings.scale.toFixed(2) + 'x';
   el('bobAmpVal').textContent = settings.bobAmp.toFixed(2);
   el('bobCyclesVal').textContent = settings.bobCycles;
+  el('sampleFracVal').textContent = Math.round(settings.sampleFraction * 100) + '%';
   el('sizeVal').textContent = settings.size + 'px';
   el('loopVal').textContent = ((settings.frames * settings.delayCs) / 100).toFixed(2) + ' s';
   el('framesVal').textContent = settings.frames;
@@ -1382,7 +1393,20 @@ bindSeg('bgSeg', (btn) => {
   settings.bg = btn.dataset.bg;
   el('bgImageCtl').hidden = settings.bg !== 'image';
 });
-bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; });
+// the palette-vs-truecolour choice, and how much of the loop feeds it, only
+// mean anything for a GIF using the shared palette, and both are technical
+// enough to stay tucked behind Exp. Mode rather than clutter the default view
+function updateOptVisibility() {
+  const isApng = settings.format === 'apng';
+  const expert = el('panel').classList.contains('advanced');
+  el('optCtl').style.display = (isApng || !expert) ? 'none' : '';
+  el('sampleCtl').style.display = (isApng || !expert || !settings.optimize) ? 'none' : '';
+}
+bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; updateOptVisibility(); });
+el('sampleFrac').addEventListener('input', () => {
+  settings.sampleFraction = Number(el('sampleFrac').value) / 100;
+  syncReadouts();
+});
 
 // background image: picked locally, decoded off-DOM with createImageBitmap and
 // never handed to the server or an <img> tag, so there's nothing here for a
@@ -1413,10 +1437,9 @@ el('bgImageFile').addEventListener('change', async (e) => {
 });
 bindSeg('formatSeg', (btn) => {
   settings.format = btn.dataset.format;
-  // the palette-vs-truecolour choice only means anything for GIF; APNG is always truecolour
-  el('optCtl').style.display = settings.format === 'apng' ? 'none' : '';
+  updateOptVisibility();
 });
-el('optCtl').style.display = settings.format === 'apng' ? 'none' : '';
+updateOptVisibility();
 
 el('previewBtn').addEventListener('click', () => {
   if (!currentModel) return status('Load a model first.', 'error');
@@ -1451,6 +1474,7 @@ el('advToggle').addEventListener('click', () => {
   } else {
     applyPresets();
   }
+  updateOptVisibility();
 });
 
 applyPresets(); // set frames/fps from the default speed + smoothness presets
