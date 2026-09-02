@@ -65,6 +65,7 @@ const defaultMaterial = new THREE.MeshStandardMaterial({
 });
 
 let currentModel = null;   // the centred/scaled group sitting in the pivot
+let modelBaseScale = 1;    // the autofit factor for the current model, before the scale slider
 let currentName = 'model'; // name of the loaded model, used for the gif filename
 let baseDistance = 5;      // the camera Z that framed the model at zoom 1
 let activeBlobUrls = [];   // blob URLs for uploaded textures, revoked on reload
@@ -76,7 +77,7 @@ let loadGeneration = 0;    // bumped each load, so a stale async callback can be
 // the loop length exact, and staying at 3cs or more dodges the browser clamp
 // that bumps tiny GIF delays up toward 100ms. that clamp is what used to make
 // "smoother" come out slower
-const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, size: 480, transparent: true, optimize: true };
+const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, transparent: true, optimize: true, bobAmp: 0, bobCycles: 1 };
 
 // "rotation speed" sets how long one full turn takes, "smoothness" sets the
 // per-frame delay. the frame count is then round(turnSec / delay), so a
@@ -389,7 +390,8 @@ function installModel(object, name, materialInfo = {}) {
   });
 
   // centre the bounding box on the pivot, then scale so the biggest dimension
-  // is about 2 world units. that way any model frames up the same
+  // is about 2 world units. that way any model frames up the same. the scale
+  // slider multiplies on top of this, for models whose autofit still looks off
   const box = new THREE.Box3().setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
@@ -398,7 +400,8 @@ function installModel(object, name, materialInfo = {}) {
   const container = new THREE.Group();
   object.position.sub(center);
   container.add(object);
-  container.scale.setScalar(2 / maxDim);
+  modelBaseScale = 2 / maxDim;
+  container.scale.setScalar(modelBaseScale * settings.scale);
 
   currentModel = container;
   currentName = (name || 'model').replace(/\.[^.]+$/, '');
@@ -706,6 +709,7 @@ const ZOOM_STEP = 1.12;       // how much one scroll notch zooms
 const MIN_ZOOM = 0.25, MAX_ZOOM = 8;
 
 let zoom = 1;
+let panX = 0, panY = 0;   // user pan offset, kept separate from the bob motion added in applyOrientation
 let lastX = 0, lastY = 0;
 let mode = 'none';            // 'rotate' | 'pan' | 'gesture' | 'none'
 const pointers = new Map();  // pointerId -> { x, y }
@@ -790,8 +794,10 @@ function panBy(dxPixels, dyPixels) {
   const dist = camera.position.z;
   const worldPerPixel =
     (2 * dist * Math.tan((camera.fov * Math.PI) / 360)) / stage.clientHeight;
-  pivot.position.x += dxPixels * worldPerPixel;
-  pivot.position.y -= dyPixels * worldPerPixel;
+  panX += dxPixels * worldPerPixel;
+  panY -= dyPixels * worldPerPixel;
+  pivot.position.x = panX;
+  pivot.position.y = panY;
 }
 
 canvas.addEventListener('wheel', (e) => {
@@ -806,10 +812,10 @@ window.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return; // don't steal keys from the URL box
 
   switch (e.key) {
-    case 'ArrowLeft':  pivot.position.x -= KEY_STEP; break;
-    case 'ArrowRight': pivot.position.x += KEY_STEP; break;
-    case 'ArrowUp':    pivot.position.y += KEY_STEP; break;
-    case 'ArrowDown':  pivot.position.y -= KEY_STEP; break;
+    case 'ArrowLeft':  panX -= KEY_STEP; pivot.position.x = panX; break;
+    case 'ArrowRight': panX += KEY_STEP; pivot.position.x = panX; break;
+    case 'ArrowUp':    panY += KEY_STEP; pivot.position.y = panY; break;
+    case 'ArrowDown':  panY -= KEY_STEP; pivot.position.y = panY; break;
     case 'r': case 'R': resetView(); break;
     case 'g': case 'G': grid.visible = !grid.visible; break;
     default: return;
@@ -819,6 +825,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 function resetView() {
+  panX = 0; panY = 0;
   pivot.position.set(0, 0, 0);
   pivot.quaternion.identity();
   zoom = 1;
@@ -871,6 +878,12 @@ function applyOrientation(p) {
   _tilt.setFromEuler(_euler);
   _yaw.setFromAxisAngle(Y_AXIS, p * Math.PI * 2);
   pivot.quaternion.copy(_yaw).multiply(_tilt); // world-space yaw, then the object's tilt
+
+  // bob is a pure world-space Y offset on the pivot, so it stays vertical on
+  // screen no matter the pitch/roll/spin. bobCycles must land on a whole
+  // number of sine periods over p in [0,1) or the GIF's loop would jump
+  pivot.position.x = panX;
+  pivot.position.y = panY + settings.bobAmp * Math.sin(p * Math.PI * 2 * settings.bobCycles);
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +976,7 @@ async function recordGif() {
   capturing = true;
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
+  const savedPos = pivot.position.clone();
   const { frames, size, fps, transparent, optimize } = settings;
   // gifenc's writeFrame wants the delay in MILLISECONDS (it stores round(ms/10)
   // as centiseconds). we track delayCs, so multiply by 10 on the way in. getting
@@ -1080,7 +1094,7 @@ async function recordGif() {
     el('capture').classList.remove('show');
     capturing = false;
     spinning = wasSpinning;
-    if (!spinning) { pivot.quaternion.copy(savedQuat); updateHUD(); }
+    if (!spinning) { pivot.quaternion.copy(savedQuat); pivot.position.copy(savedPos); updateHUD(); }
     lastFrameT = performance.now();
     renderer.setAnimationLoop(renderLoop);  // back to the normal loop
   }
@@ -1092,6 +1106,9 @@ async function recordGif() {
 function syncReadouts() {
   el('pitchVal').textContent = settings.pitch + '\u00b0';
   el('rollVal').textContent = settings.roll + '\u00b0';
+  el('scaleVal').textContent = settings.scale.toFixed(2) + 'x';
+  el('bobAmpVal').textContent = settings.bobAmp.toFixed(2);
+  el('bobCyclesVal').textContent = settings.bobCycles;
   el('sizeVal').textContent = settings.size + 'px';
   el('loopVal').textContent = ((settings.frames * settings.delayCs) / 100).toFixed(2) + ' s';
   el('framesVal').textContent = settings.frames;
@@ -1264,6 +1281,13 @@ function bindRange(id, key, poseAffecting) {
 }
 bindRange('pitch', 'pitch', true);
 bindRange('roll', 'roll', true);
+el('scale').addEventListener('input', () => {
+  settings.scale = Number(el('scale').value);
+  syncReadouts();
+  if (currentModel) currentModel.scale.setScalar(modelBaseScale * settings.scale);
+});
+bindRange('bobAmp', 'bobAmp', true);
+bindRange('bobCycles', 'bobCycles', true);
 bindRange('frames', 'frames', false); // manual mode only, hidden unless Advanced is on
 el('fps').addEventListener('input', () => {
   settings.fps = Number(el('fps').value);

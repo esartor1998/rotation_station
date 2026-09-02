@@ -342,6 +342,13 @@
     #panelStack {
       top: auto; bottom: 14px; left: 14px; right: 14px;
       width: auto; max-height: 62vh;
+      /* pointer-events:none on this element (desktop's click-through-the-gaps
+         trick) also opts it out of native touch scroll hit-testing, which is
+         why the stack could look "locked" on short screens. re-enable it here
+         since on mobile the stack is the only thing back there anyway */
+      pointer-events: auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
     }
     #panel, #lightPanel { width: auto; }
   }
@@ -445,6 +452,18 @@
       <div class="ctl">
         <div class="lbl"><span>Roll</span><span class="val" id="rollVal">0°</span></div>
         <input id="roll" type="range" min="-45" max="45" step="1" value="0" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Model scale</span><span class="val" id="scaleVal">1.00x</span></div>
+        <input id="scale" type="range" min="0.2" max="3" step="0.05" value="1" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Bob amplitude</span><span class="val" id="bobAmpVal">0.00</span></div>
+        <input id="bobAmp" type="range" min="0" max="0.6" step="0.01" value="0" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Bob speed</span><span class="val" id="bobCyclesVal">1</span></div>
+        <input id="bobCycles" type="range" min="1" max="8" step="1" value="1" title="bob cycles per full spin, kept whole so the GIF still loops seamlessly" />
       </div>
       <div class="ctl">
         <div class="lbl"><span>Output size</span><span class="val" id="sizeVal">480px</span></div>
