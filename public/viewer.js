@@ -1131,14 +1131,13 @@ function updateLightRig() {
     customLightGroup.remove(customLightGroup.children[0]);
   }
 
-  const expert = el('panel').classList.contains('advanced');
-  el('lightPanel').style.display = expert ? 'block' : 'none';
+  // the light panel now shows all the time and carries its own Exp. Mode
+  // button, so the turntable panel's expert setting no longer gates it
   el('lightPanel').classList.toggle('advanced', lightSettings.advanced);
 
-  // outside expert mode, or with advanced lighting off, we stay on the stock
-  // rig. simple mode only recolours and rescales it, so the look people are
-  // used to survives
-  if (!expert || !lightSettings.advanced) {
+  // with advanced lighting off we stay on the stock rig. simple mode only
+  // recolours and rescales it, so the look people are used to survives
+  if (!lightSettings.advanced) {
     defaultLightGroup.visible = true;
     customLightGroup.visible = false;
 
@@ -1310,14 +1309,9 @@ el('advToggle').addEventListener('click', () => {
     el('frames').value = settings.frames;
     el('fps').value = settings.fps;
     syncReadouts();
-    el('lightPanel').classList.remove('collapsed');
-    el('lightPanelToggle').textContent = '\u2013';
   } else {
     applyPresets();
-    el('lightPanel').classList.add('collapsed');
-    el('lightPanelToggle').textContent = '+';
   }
-  updateLightRig();
 });
 
 applyPresets(); // set frames/fps from the default speed + smoothness presets
@@ -1437,7 +1431,15 @@ resize();
 
 canvas.style.cursor = 'grab';
 updateHUD();
+syncLightReadouts();
 updateLightRig();
+
+// on a phone the stack eats the screen, so the light rig starts folded away,
+// the turntable panel is the one people came for, so that stays open
+if (window.innerWidth <= 720) {
+  el('lightPanel').classList.add('collapsed');
+  el('lightPanelToggle').textContent = '+';
+}
 
 function renderLoop() {
   const now = performance.now();

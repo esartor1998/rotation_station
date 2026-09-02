@@ -199,11 +199,25 @@
   #drop.show { display: flex; }
 
   /* ---- the tuning panel ---------------------------------------------------- */
-  #panel {
+  /* both panels ride in one right-hand column, so the light rig sits under the
+     turntable controls and they scroll together when the screen is short */
+  #panelStack {
     position: fixed;
-    top: 62px; right: 14px;
+    top: 62px; right: 14px; bottom: 14px;
     z-index: 9;
     width: 268px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    scrollbar-width: none;
+    pointer-events: none;
+  }
+  #panelStack::-webkit-scrollbar { display: none; }
+  #panelStack > * { pointer-events: auto; flex: 0 0 auto; }
+
+  #panel {
+    width: 100%;
     background: rgba(22,25,30,.94);
     border: 1px solid var(--line);
     border-radius: 10px;
@@ -283,16 +297,12 @@
 
   /* ---- the lighting panel -------------------------------------------------- */
   #lightPanel {
-    position: fixed;
-    top: 62px; left: 14px;
-    z-index: 9;
-    width: 268px;
+    width: 100%;
     background: rgba(22,25,30,.94);
     border: 1px solid var(--line);
     border-radius: 10px;
     backdrop-filter: blur(8px);
     overflow: hidden;
-    display: none; /* hidden until expert mode */
   }
   #lightPanel .phead {
     display: flex; align-items: center; justify-content: space-between;
@@ -328,8 +338,12 @@
     .brand { display: none; }
     #legend { display: none; }
     #hud { display: none; }
-    #panel { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
-    #lightPanel { top: auto; bottom: 14px; left: 14px; right: 14px; width: auto; }
+    /* the stack spans the width and sits at the bottom, within thumb reach */
+    #panelStack {
+      top: auto; bottom: 14px; left: 14px; right: 14px;
+      width: auto; max-height: 62vh;
+    }
+    #panel, #lightPanel { width: auto; }
   }
 
   /* ---- the overlay shown while recording ----------------------------------- */
@@ -388,6 +402,7 @@
     <div><kbd>scroll</kbd> zoom · <kbd>R</kbd> recenter · <kbd>G</kbd> grid</div>
   </div>
 
+  <div id="panelStack">
   <div id="panel">
     <div class="phead">
       <span>GIF&nbsp;<b>turntable</b></span>
@@ -468,7 +483,7 @@
     <div class="phead">
       <span>LIGHT&nbsp;<b>RIG</b></span>
       <span class="phead-actions">
-        <button id="advLightToggle" class="advbtn" title="Enable advanced lighting">Adv</button>
+        <button id="advLightToggle" class="advbtn" title="Enable advanced lighting">Exp. Mode</button>
         <button id="lightPanelToggle">–</button>
       </span>
     </div>
@@ -541,6 +556,7 @@
         </div>
       </div>
     </div>
+  </div>
   </div>
 
   <div id="status"></div>
