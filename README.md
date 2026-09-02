@@ -1,7 +1,8 @@
 # Rotation Station
 
 A sorta interactive three.js model viewer. Can load a file, a `.zip`, a folder, or a URL;
-inspect it; and always exports a smooth, seamlessly-looping rotating GIF.
+inspect it; and always exports a smooth, seamlessly-looping rotating GIF (or animated PNG or WebP).
+GIF creation is accompolished with gifenc, PNG with upng-js, and WebP with webpxmux.
 
 Supported formats: **.obj** (+`.mtl`), **.dae** (Collada), **.gltf/.glb**,
 **.stl**, **.ply**, and **.fbx**, each with their associated textures.
