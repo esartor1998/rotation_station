@@ -115,6 +115,34 @@ let capturing = false;     // is a GIF being captured right now
 let bgImageBitmap = null;
 const BG_IMAGE_MAX_BYTES = 25 * 1024 * 1024;  // mirrors the proxy's own size cap
 const BG_IMAGE_MAX_DIM = 8000;                // guards against a decompression-bomb-style file
+
+// webpxmux has no ESM build, so it can't live in the import map. it's also
+// ~2.6MB of WASM, so it's only worth fetching the first time someone actually
+// picks WebP, not on every page load. cached so the WASM only spins up once
+const WEBPXMUX_VERSION = '0.0.2';
+const WEBPXMUX_JS = `https://cdn.jsdelivr.net/npm/webpxmux@${WEBPXMUX_VERSION}/dist/webpxmux.min.js`;
+const WEBPXMUX_WASM = `https://cdn.jsdelivr.net/npm/webpxmux@${WEBPXMUX_VERSION}/dist/webpxmux.wasm`;
+let webpMuxPromise = null;
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+function getWebpMux() {
+  if (!webpMuxPromise) {
+    webpMuxPromise = (async () => {
+      if (!window.WebPXMux) await loadScript(WEBPXMUX_JS);
+      const xMux = window.WebPXMux(WEBPXMUX_WASM);
+      await xMux.waitRuntime();
+      return xMux;
+    })().catch((err) => { webpMuxPromise = null; throw err; }); // let a failed load retry next time
+  }
+  return webpMuxPromise;
+}
 let phase = 0;             // where we are in the current turn, 0 to 1
 let lastFrameT = performance.now();
 
@@ -1008,13 +1036,26 @@ async function recordGif() {
   const bgImage = settings.bg === 'image';
   if (bgImage && !bgImageBitmap) return status('Choose a background image first.', 'error');
 
-  capturing = true;
+  const isApng = settings.format === 'apng';
+  const isWebp = settings.format === 'webp';
+  capturing = true;   // set before the encoder await too, so a double-click can't start a second capture
+
+  let webpMux = null;
+  if (isWebp) {
+    try {
+      status('Loading WebP encoder…', 'busy');
+      webpMux = await getWebpMux();
+    } catch (err) {
+      capturing = false;
+      return status(`Could not load the WebP encoder: ${err.message}`, 'error');
+    }
+  }
+
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
   const savedPos = pivot.position.clone();
   const { frames, size, fps, optimize } = settings;
   const transparent = settings.bg === 'transparent';
-  const isApng = settings.format === 'apng';
   // gifenc's writeFrame wants the delay in MILLISECONDS (it stores round(ms/10)
   // as centiseconds). we track delayCs, so multiply by 10 on the way in. getting
   // this wrong is what made the fps dial do nothing. APNG's delay is already
@@ -1051,7 +1092,7 @@ async function recordGif() {
     let palette = null; // if set, it's one shared palette for every frame
 
     const needBBox = transparent;   // trim transparent exports down to the content
-    const needSample = optimize && !isApng;   // palette sampling is GIF-only, APNG stays truecolour
+    const needSample = optimize && !isApng && !isWebp;   // palette sampling is GIF-only, others stay truecolour
     const pass1 = needBBox || needSample;
 
     // how many frames feed the shared palette, spread evenly across the loop.
@@ -1116,7 +1157,7 @@ async function recordGif() {
     // ---- pass 2: encode every frame ----------------------------------------
     const p2start = pass1 ? 0.45 : 0;
     const p2span = pass1 ? 0.5 : 0.95;
-    setCapProgress(p2start, isApng ? 'Encoding APNG…' : 'Encoding GIF…');
+    setCapProgress(p2start, isApng ? 'Encoding APNG…' : isWebp ? 'Encoding WebP…' : 'Encoding GIF…');
 
     let blob, ext, label;
     if (isApng) {
@@ -1139,6 +1180,27 @@ async function recordGif() {
       blob = new Blob([bytes], { type: 'image/png' });
       ext = 'png';
       label = 'APNG';
+    } else if (isWebp) {
+      // same truecolour deal as APNG: no palette pass, full RGBA per frame.
+      // webpxmux's rgba field is a Uint32Array using the same little-endian
+      // R|G<<8|B<<16|A<<24 packing the bbox scan above already reads, so the
+      // cropped/composited bytes can be reinterpreted with no copying
+      const wFrames = [];
+      for (let i = 0; i < frames; i++) {
+        renderFrame(i);
+        let data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        if (bgImage) data = compositeOverBackground(data, bgPixels);
+        wFrames.push({ duration: delayMs, isKeyframe: true, rgba: new Uint32Array(data.buffer) });
+        setCapProgress(p2start + (i + 1) / frames * p2span);
+        await yield_();
+      }
+      setCapProgress(0.98, 'Finishing…');
+      const bytes = await webpMux.encodeFrames({
+        frameCount: frames, width: rect.w, height: rect.h, loopCount: 0, bgColor: 0, frames: wFrames,
+      });
+      blob = new Blob([bytes], { type: 'image/webp' });
+      ext = 'webp';
+      label = 'WebP';
     } else {
       const gif = GIFEncoder();
       const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
@@ -1397,10 +1459,10 @@ bindSeg('bgSeg', (btn) => {
 // mean anything for a GIF using the shared palette, and both are technical
 // enough to stay tucked behind Exp. Mode rather than clutter the default view
 function updateOptVisibility() {
-  const isApng = settings.format === 'apng';
+  const isGif = settings.format === 'gif';
   const expert = el('panel').classList.contains('advanced');
-  el('optCtl').style.display = (isApng || !expert) ? 'none' : '';
-  el('sampleCtl').style.display = (isApng || !expert || !settings.optimize) ? 'none' : '';
+  el('optCtl').style.display = (!isGif || !expert) ? 'none' : '';
+  el('sampleCtl').style.display = (!isGif || !expert || !settings.optimize) ? 'none' : '';
 }
 bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; updateOptVisibility(); });
 el('sampleFrac').addEventListener('input', () => {

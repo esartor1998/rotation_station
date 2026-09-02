@@ -8,7 +8,10 @@
 <link rel="icon" href="favicon.ico" type="image/x-icon">
 <!-- three.js, fflate (for zips), gifenc (the transparent GIF encoder) and
      upng-js (the APNG encoder) all come from a CDN via the import map below.
-     grab them locally if you want a CDN-free deploy. -->
+     grab them locally if you want a CDN-free deploy. webpxmux (the animated
+     WebP encoder) isn't here: it has no ESM build, and at ~2.6MB of WASM it's
+     only worth fetching if someone actually picks WebP, so viewer.js loads it
+     on demand as a plain script tag instead. -->
 <script type="importmap">
 {
   "imports": {
@@ -503,6 +506,7 @@
           <div class="seg" id="formatSeg">
             <button data-format="gif" class="on">GIF</button>
             <button data-format="apng">APNG</button>
+            <button data-format="webp">WebP</button>
           </div>
         </div>
         <div class="ctl">
