@@ -113,6 +113,12 @@
   .primary:hover { background: #ffce6d; }
 
   #file { display: none; }
+  #bgImageFile { display: none; }
+  .bg-image-picker {
+    width: 100%; text-align: center; display: block;
+    font-family: var(--mono); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   /* ---- the viewport -------------------------------------------------------- */
   #stage { position: fixed; inset: 0; }
@@ -502,9 +508,16 @@
         <div class="ctl">
           <div class="lbl"><span>Background</span></div>
           <div class="seg" id="bgSeg">
-            <button data-bg="1" class="on">Transparent</button>
-            <button data-bg="0">Solid</button>
+            <button data-bg="transparent" class="on">Transparent</button>
+            <button data-bg="solid">Solid</button>
+            <button data-bg="image">Image</button>
           </div>
+        </div>
+        <div class="ctl" id="bgImageCtl" hidden>
+          <label class="filelabel bg-image-picker" tabindex="0">
+            <span id="bgImageName">Choose background image…</span>
+            <input id="bgImageFile" type="file" accept="image/*" />
+          </label>
         </div>
         <div class="ctl" id="optCtl">
           <div class="lbl"><span>Optimize filesize</span></div>

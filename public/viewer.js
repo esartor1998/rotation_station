@@ -78,7 +78,7 @@ let loadGeneration = 0;    // bumped each load, so a stale async callback can be
 // the loop length exact, and staying at 3cs or more dodges the browser clamp
 // that bumps tiny GIF delays up toward 100ms. that clamp is what used to make
 // "smoother" come out slower
-const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, transparent: true, optimize: true, bobAmp: 0, bobCycles: 1, format: 'gif' };
+const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, bg: 'transparent', optimize: true, bobAmp: 0, bobCycles: 1, format: 'gif' };
 
 // "rotation speed" sets how long one full turn takes, "smoothness" sets the
 // per-frame delay. the frame count is then round(turnSec / delay), so a
@@ -109,6 +109,12 @@ function applyPresets() {
 }
 let spinning = false;      // is the live preview spinning
 let capturing = false;     // is a GIF being captured right now
+// the user's chosen background image for "Image" mode. decoded fully client-side
+// (createImageBitmap off a local File/blob, never an <img> or a network fetch), so
+// nothing about it ever touches the server or gets written to disk
+let bgImageBitmap = null;
+const BG_IMAGE_MAX_BYTES = 25 * 1024 * 1024;  // mirrors the proxy's own size cap
+const BG_IMAGE_MAX_DIM = 8000;                // guards against a decompression-bomb-style file
 let phase = 0;             // where we are in the current turn, 0 to 1
 let lastFrameT = performance.now();
 
@@ -963,6 +969,32 @@ function concatRGBA(list) {
   return out;
 }
 
+// letterbox-fit the background image into a size x size canvas (no cropping,
+// no stretching) and read it back as straight-alpha RGBA, once per recording
+function buildBackgroundPixels(bitmap, size) {
+  const c = Object.assign(document.createElement('canvas'), { width: size, height: size });
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#0d0f12';   // same shade as the app's own background, for any letterbox bars
+  ctx.fillRect(0, 0, size, size);
+  const scale = Math.min(size / bitmap.width, size / bitmap.height);
+  const dw = bitmap.width * scale, dh = bitmap.height * scale;
+  ctx.drawImage(bitmap, (size - dw) / 2, (size - dh) / 2, dw, dh);
+  return ctx.getImageData(0, 0, size, size).data;
+}
+
+// alpha-composite a rendered (straight-alpha) frame over the prepared background
+function compositeOverBackground(fg, bg) {
+  const out = new Uint8ClampedArray(fg.length);
+  for (let i = 0; i < fg.length; i += 4) {
+    const a = fg[i + 3] / 255;
+    out[i]     = fg[i]     * a + bg[i]     * (1 - a);
+    out[i + 1] = fg[i + 1] * a + bg[i + 1] * (1 - a);
+    out[i + 2] = fg[i + 2] * a + bg[i + 2] * (1 - a);
+    out[i + 3] = 255;
+  }
+  return out;
+}
+
 const ALPHA_THRESHOLD = 8;  // matches where the GIF's 1-bit alpha cuts off
 const CROP_PAD = 1;         // leave a hair of margin around the content
 const SAMPLE_FRAMES = 12;   // how many frames we sample to build the shared palette
@@ -974,11 +1006,15 @@ async function recordGif() {
   if (capturing) return;
   if (!currentModel) return status('Load a model first.', 'error');
 
+  const bgImage = settings.bg === 'image';
+  if (bgImage && !bgImageBitmap) return status('Choose a background image first.', 'error');
+
   capturing = true;
   const wasSpinning = spinning;
   const savedQuat = pivot.quaternion.clone();
   const savedPos = pivot.position.clone();
-  const { frames, size, fps, transparent, optimize } = settings;
+  const { frames, size, fps, optimize } = settings;
+  const transparent = settings.bg === 'transparent';
   const isApng = settings.format === 'apng';
   // gifenc's writeFrame wants the delay in MILLISECONDS (it stores round(ms/10)
   // as centiseconds). we track delayCs, so multiply by 10 on the way in. getting
@@ -990,10 +1026,16 @@ async function recordGif() {
   renderer.setAnimationLoop(null);          // we drive the loop ourselves while capturing
   const restore = enterCaptureResolution(size);
 
+  // a custom background is composited in afterwards from a plain 2D canvas, so
+  // the render itself still needs the same clean alpha cutout a transparent
+  // export uses. only the palette/encode step downstream tells them apart
+  const wantsAlphaClear = transparent || bgImage;
+  const bgPixels = bgImage ? buildBackgroundPixels(bgImageBitmap, size) : null;
+
   // for a clean cutout: clear to fully transparent and hide the grid
   const savedBg = scene.background;
   const savedGrid = grid.visible;
-  if (transparent) { scene.background = null; renderer.setClearColor(0x000000, 0); }
+  if (wantsAlphaClear) { scene.background = null; renderer.setClearColor(0x000000, 0); }
   grid.visible = false;
 
   el('capture').classList.add('show');
@@ -1036,7 +1078,7 @@ async function recordGif() {
               }
             }
           }
-          if (isSample) samples.push(img.data.slice());
+          if (isSample) samples.push(bgImage ? compositeOverBackground(img.data, bgPixels) : img.data.slice());
           await yield_();
         }
         setCapProgress((i + 1) / frames * 0.45);
@@ -1066,28 +1108,34 @@ async function recordGif() {
     const p2span = pass1 ? 0.5 : 0.95;
     setCapProgress(p2start, isApng ? 'Encoding APNG…' : 'Encoding GIF…');
 
-    let blob, ext;
+    let blob, ext, label;
     if (isApng) {
       // APNG stores full 32-bit RGBA per frame, so no palette pass and no
       // colour-count cap the way GIF has. cnum=0 tells UPNG to stay truecolour
       const rgbaFrames = [];
       for (let i = 0; i < frames; i++) {
         renderFrame(i);
-        const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        let data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        if (bgImage) data = compositeOverBackground(data, bgPixels);
         rgbaFrames.push(data.buffer);
         setCapProgress(p2start + (i + 1) / frames * p2span);
         await yield_();
       }
       setCapProgress(0.98, 'Finishing…');
       const bytes = UPNG.encode(rgbaFrames, rect.w, rect.h, 0, rgbaFrames.map(() => delayMs));
-      blob = new Blob([bytes], { type: 'image/apng' });
+      // APNG is valid PNG (non-animated readers just show frame 0), so it gets
+      // the plain .png extension and mime, but keep the status readout saying
+      // APNG so it's clear the file actually loops
+      blob = new Blob([bytes], { type: 'image/png' });
       ext = 'png';
+      label = 'APNG';
     } else {
       const gif = GIFEncoder();
       const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
       for (let i = 0; i < frames; i++) {
         renderFrame(i);
-        const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        let data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        if (bgImage) data = compositeOverBackground(data, bgPixels);
         // shared global palette if optimize is on, otherwise a fresh one each frame
         const framePalette = palette || quantize(data, 256, qOpts);
         const index = applyPalette(data, framePalette, format);
@@ -1103,15 +1151,16 @@ async function recordGif() {
       gif.finish();
       blob = new Blob([gif.bytes()], { type: 'image/gif' });
       ext = 'gif';
+      label = 'GIF';
     }
 
     setCapProgress(1);
     downloadBlob(blob, `${currentName}-spin.${ext}`);
-    status(`${ext.toUpperCase()} saved · ${rect.w}\u00d7${rect.h} · ${Math.round(blob.size / 1024)} KB`, 'ok');
+    status(`${label} saved · ${rect.w}\u00d7${rect.h} · ${Math.round(blob.size / 1024)} KB`, 'ok');
   } catch (err) {
     status(`Recording failed: ${err.message}`, 'error');
   } finally {
-    if (transparent) { scene.background = savedBg; renderer.setClearColor(0x000000, 1); }
+    if (wantsAlphaClear) { scene.background = savedBg; renderer.setClearColor(0x000000, 1); }
     grid.visible = savedGrid;
     restore();
     el('capture').classList.remove('show');
@@ -1329,8 +1378,39 @@ function bindSeg(segId, onPick) {
 bindSeg('speedSeg', (btn) => { speedIdx = Number(btn.dataset.i); applyPresets(); });
 bindSeg('smoothSeg', (btn) => { smoothIdx = Number(btn.dataset.i); applyPresets(); });
 bindSeg('sizeSeg', (btn) => { settings.size = Number(btn.dataset.size); syncReadouts(); });
-bindSeg('bgSeg', (btn) => { settings.transparent = btn.dataset.bg === '1'; });
+bindSeg('bgSeg', (btn) => {
+  settings.bg = btn.dataset.bg;
+  el('bgImageCtl').hidden = settings.bg !== 'image';
+});
 bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; });
+
+// background image: picked locally, decoded off-DOM with createImageBitmap and
+// never handed to the server or an <img> tag, so there's nothing here for a
+// malicious file to do beyond waste this tab's own memory. capped accordingly
+el('bgImageFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (file.size > BG_IMAGE_MAX_BYTES) {
+    status('Background image is too large (25 MB max).', 'error');
+    e.target.value = '';
+    return;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    if (bitmap.width > BG_IMAGE_MAX_DIM || bitmap.height > BG_IMAGE_MAX_DIM) {
+      bitmap.close();
+      status('Background image dimensions are too large.', 'error');
+      e.target.value = '';
+      return;
+    }
+    bgImageBitmap?.close();
+    bgImageBitmap = bitmap;
+    el('bgImageName').textContent = file.name;
+  } catch {
+    status('Could not read that image.', 'error');
+  }
+  e.target.value = '';
+});
 bindSeg('formatSeg', (btn) => {
   settings.format = btn.dataset.format;
   // the palette-vs-truecolour choice only means anything for GIF; APNG is always truecolour
