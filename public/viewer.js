@@ -22,19 +22,28 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
 // default lighting, swapped out for the custom rig in expert mode
+// a strong directional key makes a matte model read as
+// glossy, because one hot side next to a dark side looks like a highlight. so
+// most of the light comes from a bright hemisphere plus a back light, which
+// reaches every pixel, and the key only shapes it
 const defaultLightGroup = new THREE.Group();
 scene.add(defaultLightGroup);
 
-const hemi = new THREE.HemisphereLight(0xffffff, 0x202028, 1.1);
+const hemi = new THREE.HemisphereLight(0xffffff, 0x9aa0ad, 2.0);
 defaultLightGroup.add(hemi);
 
-const key = new THREE.DirectionalLight(0xffffff, 1.6);
+const key = new THREE.DirectionalLight(0xffffff, 0.55);
 key.position.set(3, 5, 4);
 defaultLightGroup.add(key);
 
-const fill = new THREE.DirectionalLight(0xbfd4ff, 0.5);
+const fill = new THREE.DirectionalLight(0xbfd4ff, 0.35);
 fill.position.set(-4, -1, -3);
 defaultLightGroup.add(fill);
+
+// a back light so faces pointing away from the camera never go flat black
+const rim = new THREE.DirectionalLight(0xffffff, 0.3);
+rim.position.set(-2, 2, -5);
+defaultLightGroup.add(rim);
 
 const customLightGroup = new THREE.Group();
 scene.add(customLightGroup);
@@ -287,11 +296,17 @@ function finishGeometry(geo, name, preferVertexColors) {
 // transparent area easily survives the downscale
 // ---------------------------------------------------------------------------
 let _alphaCanvas = null, _alphaCtx = null;
-function textureHasAlpha(tex) {
+// returns 'none', 'cutout' or 'blend'. cutout means the alpha is effectively
+// binary, which is what most game rips use. those want alphaTest rather
+// than blending: a blended material leaves the opaque pass and
+// gets sorted per object, so a model split into many parts sharing one material
+// flickers as the sort order changes while it spins. alphaTest keeps everything
+// in the opaque pass with normal depth testing, so nothing flickers
+function classifyTextureAlpha(tex) {
   const img = tex && tex.image;
-  if (!img || !img.width || !img.height) return false;
+  if (!img || !img.width || !img.height) return 'none';
   try {
-    const S = 32;
+    const S = 64;
     if (!_alphaCtx) {
       _alphaCanvas = Object.assign(document.createElement('canvas'), { width: S, height: S });
       _alphaCtx = _alphaCanvas.getContext('2d', { willReadFrequently: true });
@@ -299,10 +314,20 @@ function textureHasAlpha(tex) {
     _alphaCtx.clearRect(0, 0, S, S);
     _alphaCtx.drawImage(img, 0, 0, S, S);
     const data = _alphaCtx.getImageData(0, 0, S, S).data;
-    for (let i = 3; i < data.length; i += 4) if (data[i] < 255) return true;
-    return false;
+    let seen = 0, mid = 0;
+    for (let i = 3; i < data.length; i += 4) {
+      const a = data[i];
+      if (a < 250) {
+        seen++;
+        if (a > 16 && a < 239) mid++; // a genuinely partial pixel
+      }
+    }
+    if (!seen) return 'none';
+    // downscaling blurs hard edges into partial pixels, so allow a slice of them
+    // before calling the texture properly translucent
+    return (mid / seen) > 0.25 ? 'blend' : 'cutout';
   } catch {
-    return false; // tainted cross-origin canvas etc. fail safe rather than crash
+    return 'none'; // tainted cross-origin canvas etc. fail safe rather than crash
   }
 }
 
@@ -311,9 +336,24 @@ function applyAlphaTransparencyFix(root) {
     if (!child.isMesh) return;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     mats.forEach((mat) => {
-      if (!mat || mat.transparent) return; // leave alone anything that already asked for transparency
+      if (!mat) return;
       if (mat.alphaMap) { mat.transparent = true; mat.needsUpdate = true; return; }
-      if (mat.map && textureHasAlpha(mat.map)) { mat.transparent = true; mat.needsUpdate = true; }
+      if (!mat.map) return;
+
+      const kind = classifyTextureAlpha(mat.map);
+      if (kind === 'none') return;
+
+      if (kind === 'cutout') {
+        // punch the see-through pixels out instead of blending, and stay in the
+        // opaque pass. this also undoes a loader that flagged the material
+        // transparent purely because the texture carried an alpha channel
+        mat.transparent = false;
+        mat.alphaTest = 0.5;
+        mat.depthWrite = true;
+      } else if (!mat.transparent) {
+        mat.transparent = true;
+      }
+      mat.needsUpdate = true;
     });
   });
 }
@@ -340,7 +380,7 @@ function installModel(object, name, materialInfo = {}) {
       }
       mat.side = THREE.DoubleSide;                 // nicer for previewing
       if (mat.map) mat.map.colorSpace = THREE.SRGBColorSpace; // keeps texture colours correct
-      makeMatteIfUnspecified(mat);
+      if (lightSettings.forceMatte) makeMatte(mat);
       mat.needsUpdate = true;
     });
 
@@ -385,30 +425,61 @@ function isBlankObjMaterial(mat) {
 // so a model that says nothing about reflectivity arrives looking like wet
 // plastic. we can spot that case: an untouched material still holds the exact
 // defaults, so if we see them we assume nothing was specified and go matte
-const PHONG_DEFAULT_SHININESS = 30;
-const PHONG_DEFAULT_SPECULAR = 0x111111;
-
-function makeMatteIfUnspecified(mat) {
-  if (!mat) return;
+// three's MeshPhongMaterial defaults to shininess 30 with a grey specular, and
+// the loaders only overwrite those when the source file declares them. so a
+// model that says nothing about reflectivity turns up looking like wet plastic
+// worse, Blender's FBX exporter writes a boilerplate specular block into every
+// material whether the artist wanted one or not, so "did the file declare it"
+// is not a signal we can trust on its own. instead we strip the sheen off
+// anything with no specular or roughness map to justify it, and stash the old
+// values so the Shiny toggle can put them back
+function makeMatte(mat) {
+  if (!mat || mat._matteSaved) return;
   if (mat.isMeshPhongMaterial) {
-    const untouchedShine = mat.shininess === PHONG_DEFAULT_SHININESS;
-    const untouchedSpec = mat.specular && mat.specular.getHex() === PHONG_DEFAULT_SPECULAR;
-    if (untouchedShine && untouchedSpec && !mat.specularMap) {
-      mat.shininess = 0;
-      mat.specular.setHex(0x000000);
-      mat.needsUpdate = true;
-    }
-    return;
+    if (mat.specularMap) return; // a real map means the shine was authored
+    mat._matteSaved = { shininess: mat.shininess, specular: mat.specular.getHex() };
+    mat.shininess = 0;
+    mat.specular.setHex(0x000000);
+    mat.needsUpdate = true;
+  } else if (mat.isMeshStandardMaterial) {
+    if (mat.metalnessMap || mat.roughnessMap) return;
+    mat._matteSaved = { metalness: mat.metalness, roughness: mat.roughness };
+    mat.metalness = 0;
+    mat.roughness = 1;
+    mat.needsUpdate = true;
+  } else if (mat.isMeshLambertMaterial) {
+    // lambert is diffuse already, but reflectivity still feeds an env map
+    mat._matteSaved = { reflectivity: mat.reflectivity };
+    mat.reflectivity = 0;
+    mat.needsUpdate = true;
   }
-  // glTF and friends give us PBR materials. a fully default one (roughness 1,
-  // metalness 0) is already matte, so only the metalness needs flattening when
-  // no metalnessMap or roughnessMap came along to justify it
-  if (mat.isMeshStandardMaterial) {
-    if (mat.metalness > 0 && !mat.metalnessMap && !mat.roughnessMap && mat.roughness === 1) {
-      mat.metalness = 0;
-      mat.needsUpdate = true;
-    }
+}
+
+function restoreShine(mat) {
+  if (!mat || !mat._matteSaved) return;
+  const saved = mat._matteSaved;
+  delete mat._matteSaved;
+  if (saved.specular !== undefined) {
+    mat.shininess = saved.shininess;
+    mat.specular.setHex(saved.specular);
+  } else if (saved.metalness !== undefined) {
+    mat.metalness = saved.metalness;
+    mat.roughness = saved.roughness;
+  } else if (saved.reflectivity !== undefined) {
+    mat.reflectivity = saved.reflectivity;
   }
+  mat.needsUpdate = true;
+}
+
+// walks whatever is loaded and applies the current Matte setting
+function applyMatteSetting(root) {
+  const target = root || currentModel;
+  if (!target) return;
+  target.traverse((child) => {
+    if (!child.isMesh) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach((m) => (lightSettings.forceMatte ? makeMatte(m) : restoreShine(m)));
+  });
 }
 
 function disposeTree(root) {
@@ -1034,6 +1105,7 @@ function syncReadouts() {
 // ---------------------------------------------------------------------------
 const lightSettings = {
   advanced: false,
+  forceMatte: true,
   count: 2,
   type: 'directional',
   distance: 5,
@@ -1051,7 +1123,7 @@ const lightSettings = {
 };
 
 // the stock rig's original intensities, so simple mode can scale from them
-const BASE_HEMI = 1.1, BASE_KEY = 1.6, BASE_FILL = 0.5;
+const BASE_HEMI = 2.0, BASE_KEY = 0.55, BASE_FILL = 0.35, BASE_RIM = 0.3;
 const BASE_FILL_COLOUR = 0xbfd4ff;
 
 function updateLightRig() {
@@ -1079,6 +1151,8 @@ function updateLightRig() {
     // the fill keeps its cool cast, tinted toward whatever colour was picked
     fill.color.copy(new THREE.Color(BASE_FILL_COLOUR).multiply(tint));
     fill.intensity = BASE_FILL * b;
+    rim.color.copy(tint);
+    rim.intensity = BASE_RIM * b;
     return;
   }
 
@@ -1252,6 +1326,11 @@ applyPresets(); // set frames/fps from the default speed + smoothness presets
 bindSeg('lightTypeSeg', (btn) => { lightSettings.type = btn.dataset.type; syncLightReadouts(); updateLightRig(); });
 bindSeg('lightSpinSeg', (btn) => { lightSettings.spins = btn.dataset.spin === '1'; applyRigSpin(); });
 
+bindSeg('matteSeg', (btn) => {
+  lightSettings.forceMatte = btn.dataset.matte === '1';
+  applyMatteSetting();
+});
+
 el('advLightToggle').addEventListener('click', () => {
   lightSettings.advanced = !lightSettings.advanced;
   el('advLightToggle').classList.toggle('on', lightSettings.advanced);
@@ -1338,8 +1417,9 @@ window.addEventListener('drop', (e) => {
       for (const en of entries) await walkEntry(en, files);
     }
     if (!files.length) files = plainFiles;
-    if (files.some((f) => /\.(obj|zip)$/i.test(f.name))) loadFromFiles(files);
-    else status('Drop a .zip, a folder, or files that include a .obj.', 'error');
+    const usable = files.some((f) => SUPPORTED_RE.test(f.name) || /\.zip$/i.test(f.name));
+    if (usable) loadFromFiles(files);
+    else status('Drop a model (.obj/.dae/.gltf/.glb/.stl/.ply/.fbx), a .zip, or a folder', 'error');
   })();
 });
 
