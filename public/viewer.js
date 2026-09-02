@@ -1119,7 +1119,7 @@ const lightSettings = {
   spins: false,
   // simple mode just tints and dims the stock rig
   simpleColour: '#ffffff',
-  simpleBrightness: 1,
+  simpleBrightness: 3,
 };
 
 // the stock rig's original intensities, so simple mode can scale from them
