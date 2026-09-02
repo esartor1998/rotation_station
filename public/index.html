@@ -281,12 +281,50 @@
   #previewBtn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
   #recordBtn { flex: 1; }
 
+  /* ---- the lighting panel -------------------------------------------------- */
+  #lightPanel {
+    position: fixed;
+    top: 62px; left: 14px;
+    z-index: 9;
+    width: 268px;
+    background: rgba(22,25,30,.94);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    backdrop-filter: blur(8px);
+    overflow: hidden;
+    display: none; /* hidden until expert mode */
+  }
+  #lightPanel .phead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 13px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--line);
+  }
+  #lightPanel .phead b { color: var(--accent); font-weight: 600; }
+  #lightPanel .pbody { padding: 12px 13px 14px; display: grid; gap: 13px; }
+  #lightPanel.collapsed .pbody { display: none; }
+  #lightPanelToggle {
+    background: none; border: none; padding: 0; margin: 0;
+    color: var(--muted); font-family: var(--mono); font-size: 15px; cursor: pointer;
+  }
+
+  input[type="color"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 28px; border: none; border-radius: 5px;
+    background: none; cursor: pointer;
+  }
+  input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  input[type="color"]::-webkit-color-swatch { border: 1px solid var(--line); border-radius: 5px; }
+  input[type="color"]::-moz-color-swatch { border: 1px solid var(--line); border-radius: 5px; }
+
   @media (max-width: 720px) {
     input[type="url"] { width: 40vw; }
     .brand { display: none; }
     #legend { display: none; }
     #hud { display: none; }
     #panel { top: auto; bottom: 14px; right: 14px; left: 14px; width: auto; }
+    #lightPanel { top: auto; bottom: 14px; left: 14px; right: 14px; width: auto; }
   }
 
   /* ---- the overlay shown while recording ----------------------------------- */
@@ -417,6 +455,52 @@
       <div class="pactions">
         <button id="previewBtn">Preview</button>
         <button id="recordBtn" class="primary">Record GIF</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="lightPanel">
+    <div class="phead">
+      <span>LIGHT&nbsp;<b>RIG</b></span>
+      <button id="lightPanelToggle">–</button>
+    </div>
+    <div class="pbody">
+      <div class="ctl">
+        <div class="lbl"><span>Active lights</span></div>
+        <div class="seg" id="lightCountSeg">
+          <button data-n="1">1</button>
+          <button data-n="2" class="on">2</button>
+          <button data-n="3">3</button>
+          <button data-n="4">4</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Type</span></div>
+        <div class="seg" id="lightTypeSeg">
+          <button data-type="directional" class="on">Directional</button>
+          <button data-type="point">Point</button>
+          <button data-type="spot">Spot</button>
+        </div>
+      </div>
+      <div class="ctl" id="distanceCtl" style="display:none">
+        <div class="lbl"><span>Distance (harshness)</span><span class="val" id="distVal">5</span></div>
+        <input id="distance" type="range" min="1" max="15" step="0.5" value="5" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Orbit</span><span class="val" id="orbitVal">45°</span></div>
+        <input id="orbit" type="range" min="0" max="360" step="1" value="45" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Elevation</span><span class="val" id="elevVal">20°</span></div>
+        <input id="elevation" type="range" min="-90" max="90" step="1" value="20" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Colour</span></div>
+        <input id="lightColour" type="color" value="#ffffff" />
+      </div>
+      <div class="ctl">
+        <div class="lbl"><span>Brightness</span><span class="val" id="brightVal">1.6</span></div>
+        <input id="brightness" type="range" min="0" max="5" step="0.1" value="1.6" />
       </div>
     </div>
   </div>

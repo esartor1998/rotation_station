@@ -21,23 +21,32 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
-// soft key + fill light, so even an untextured mesh still reads as a solid
-scene.add(new THREE.HemisphereLight(0xffffff, 0x202028, 1.1));
+// default lighting — swapped out for the custom rig in expert mode
+const defaultLightGroup = new THREE.Group();
+scene.add(defaultLightGroup);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x202028, 1.1);
+defaultLightGroup.add(hemi);
+
 const key = new THREE.DirectionalLight(0xffffff, 1.6);
 key.position.set(3, 5, 4);
-scene.add(key);
+defaultLightGroup.add(key);
+
 const fill = new THREE.DirectionalLight(0xbfd4ff, 0.5);
 fill.position.set(-4, -1, -3);
-scene.add(fill);
+defaultLightGroup.add(fill);
+
+const customLightGroup = new THREE.Group();
+scene.add(customLightGroup);
 
 // ground grid, just so you can tell where the model is when you move it
 const grid = new THREE.GridHelper(20, 40, 0x2a2f38, 0x1c2027);
 grid.position.y = -1.4;
 scene.add(grid);
 
-// `pivot` is the thing you actually manipulate. rotation lives on its
+// `pivot` is the thing you actually manipulate. rotation exists on its
 // quaternion, panning on its position. the model gets centered inside it so it
-// always spins around its own middle
+// always* spins around its own middle
 const pivot = new THREE.Group();
 scene.add(pivot);
 
@@ -989,6 +998,84 @@ function syncReadouts() {
 }
 
 // ---------------------------------------------------------------------------
+// lighting rig
+// ---------------------------------------------------------------------------
+const lightSettings = {
+  count: 2,
+  type: 'directional',
+  distance: 5,
+  orbit: 45,
+  elevation: 20,
+  colour: '#ffffff',
+  brightness: 1.6,
+};
+
+function updateLightRig() {
+  while (customLightGroup.children.length) {
+    customLightGroup.remove(customLightGroup.children[0]);
+  }
+
+  const expert = el('panel').classList.contains('advanced');
+  if (!expert) {
+    defaultLightGroup.visible = true;
+    customLightGroup.visible = false;
+    el('lightPanel').style.display = 'none';
+    return;
+  }
+
+  defaultLightGroup.visible = false;
+  customLightGroup.visible = true;
+  el('lightPanel').style.display = 'block';
+
+  const { count, type, distance, orbit, elevation, colour, brightness } = lightSettings;
+  const c = new THREE.Color(colour);
+  const orbitRad = THREE.MathUtils.degToRad(orbit);
+  const elevRad = THREE.MathUtils.degToRad(elevation);
+
+  for (let i = 0; i < count; i++) {
+    const angle = orbitRad + (i / count) * Math.PI * 2;
+    const cosElev = Math.cos(elevRad);
+    const x = Math.cos(angle) * cosElev;
+    const z = Math.sin(angle) * cosElev;
+    const y = Math.sin(elevRad);
+
+    let light;
+    if (type === 'directional') {
+      light = new THREE.DirectionalLight(c, brightness);
+      light.position.set(x, y, z);
+    } else if (type === 'point') {
+      light = new THREE.PointLight(c, brightness, distance * 3, 1);
+      light.position.set(x * distance, y * distance, z * distance);
+    } else if (type === 'spot') {
+      light = new THREE.SpotLight(c, brightness, distance * 3, Math.PI / 4, 0.5, 1);
+      light.position.set(x * distance, y * distance, z * distance);
+      light.target.position.set(0, 0, 0);
+      customLightGroup.add(light.target);
+    }
+    customLightGroup.add(light);
+  }
+}
+
+function syncLightReadouts() {
+  el('distVal').textContent = lightSettings.distance;
+  el('orbitVal').textContent = lightSettings.orbit + '\u00b0';
+  el('elevVal').textContent = lightSettings.elevation + '\u00b0';
+  el('brightVal').textContent = lightSettings.brightness.toFixed(1);
+  el('distanceCtl').style.display = lightSettings.type === 'directional' ? 'none' : '';
+}
+
+function maybeCollapseOther(opening) {
+  if (window.innerWidth > 720) return;
+  if (opening === 'gif') {
+    el('lightPanel').classList.add('collapsed');
+    el('lightPanelToggle').textContent = '+';
+  } else {
+    el('panel').classList.add('collapsed');
+    el('panelToggle').textContent = '+';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // wiring it all up
 // ---------------------------------------------------------------------------
 el('loadUrl').addEventListener('click', () => loadFromURL(el('url').value));
@@ -1044,22 +1131,55 @@ el('recordBtn').addEventListener('click', recordGif);
 el('panelToggle').addEventListener('click', () => {
   const collapsed = el('panel').classList.toggle('collapsed');
   el('panelToggle').textContent = collapsed ? '+' : '\u2013';
+  if (!collapsed) maybeCollapseOther('gif');
 });
 
 el('advToggle').addEventListener('click', () => {
   const adv = el('panel').classList.toggle('advanced');
   el('advToggle').classList.toggle('on', adv);
   if (adv) {
-    // start the sliders from whatever the presets currently give us
     el('frames').value = settings.frames;
     el('fps').value = settings.fps;
     syncReadouts();
+    el('lightPanel').classList.remove('collapsed');
+    el('lightPanelToggle').textContent = '\u2013';
   } else {
-    applyPresets(); // hand control back to the presets
+    applyPresets();
+    el('lightPanel').classList.add('collapsed');
+    el('lightPanelToggle').textContent = '+';
   }
+  updateLightRig();
 });
 
 applyPresets(); // set frames/fps from the default speed + smoothness presets
+
+// --- light panel controls ---
+bindSeg('lightCountSeg', (btn) => { lightSettings.count = Number(btn.dataset.n); updateLightRig(); });
+bindSeg('lightTypeSeg', (btn) => { lightSettings.type = btn.dataset.type; syncLightReadouts(); updateLightRig(); });
+
+function bindLightRange(id, key) {
+  const input = el(id);
+  input.addEventListener('input', () => {
+    lightSettings[key] = Number(input.value);
+    syncLightReadouts();
+    updateLightRig();
+  });
+}
+bindLightRange('distance', 'distance');
+bindLightRange('orbit', 'orbit');
+bindLightRange('elevation', 'elevation');
+bindLightRange('brightness', 'brightness');
+
+el('lightColour').addEventListener('input', () => {
+  lightSettings.colour = el('lightColour').value;
+  updateLightRig();
+});
+
+el('lightPanelToggle').addEventListener('click', () => {
+  const collapsed = el('lightPanel').classList.toggle('collapsed');
+  el('lightPanelToggle').textContent = collapsed ? '+' : '\u2013';
+  if (!collapsed) maybeCollapseOther('light');
+});
 
 // walk a dropped folder and pull all the File objects out of it
 function walkEntry(entry, out) {
@@ -1124,6 +1244,7 @@ resize();
 
 canvas.style.cursor = 'grab';
 updateHUD();
+updateLightRig();
 
 function renderLoop() {
   const now = performance.now();
