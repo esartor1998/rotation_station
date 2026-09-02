@@ -1081,7 +1081,7 @@ async function recordGif() {
       setCapProgress(0.98, 'Finishing…');
       const bytes = UPNG.encode(rgbaFrames, rect.w, rect.h, 0, rgbaFrames.map(() => delayMs));
       blob = new Blob([bytes], { type: 'image/apng' });
-      ext = 'apng';
+      ext = 'png';
     } else {
       const gif = GIFEncoder();
       const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
