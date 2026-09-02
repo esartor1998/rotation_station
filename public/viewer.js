@@ -3,6 +3,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { unzip } from 'fflate';
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
+import UPNG from 'upng-js';
 
 // ---------------------------------------------------------------------------
 // scene, camera, renderer
@@ -77,7 +78,7 @@ let loadGeneration = 0;    // bumped each load, so a stale async callback can be
 // the loop length exact, and staying at 3cs or more dodges the browser clamp
 // that bumps tiny GIF delays up toward 100ms. that clamp is what used to make
 // "smoother" come out slower
-const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, transparent: true, optimize: true, bobAmp: 0, bobCycles: 1 };
+const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, transparent: true, optimize: true, bobAmp: 0, bobCycles: 1, format: 'gif' };
 
 // "rotation speed" sets how long one full turn takes, "smoothness" sets the
 // per-frame delay. the frame count is then round(turnSec / delay), so a
@@ -978,9 +979,11 @@ async function recordGif() {
   const savedQuat = pivot.quaternion.clone();
   const savedPos = pivot.position.clone();
   const { frames, size, fps, transparent, optimize } = settings;
+  const isApng = settings.format === 'apng';
   // gifenc's writeFrame wants the delay in MILLISECONDS (it stores round(ms/10)
   // as centiseconds). we track delayCs, so multiply by 10 on the way in. getting
-  // this wrong is what made the fps dial do nothing
+  // this wrong is what made the fps dial do nothing. APNG's delay is already
+  // plain milliseconds, so it reuses the same value
   const delayMs = Math.max(10, settings.delayCs * 10);
   const format = transparent ? 'rgba4444' : 'rgb565';
 
@@ -1007,7 +1010,7 @@ async function recordGif() {
     let palette = null; // if set, it's one shared palette for every frame
 
     const needBBox = transparent;   // trim transparent exports down to the content
-    const needSample = optimize;    // sample some frames to build a global palette
+    const needSample = optimize && !isApng;   // palette sampling is GIF-only, APNG stays truecolour
     const pass1 = needBBox || needSample;
 
     if (pass1) {
@@ -1061,30 +1064,50 @@ async function recordGif() {
     // ---- pass 2: encode every frame ----------------------------------------
     const p2start = pass1 ? 0.45 : 0;
     const p2span = pass1 ? 0.5 : 0.95;
-    setCapProgress(p2start, 'Encoding GIF…');
-    const gif = GIFEncoder();
-    const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
-    for (let i = 0; i < frames; i++) {
-      renderFrame(i);
-      const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
-      // shared global palette if optimize is on, otherwise a fresh one each frame
-      const framePalette = palette || quantize(data, 256, qOpts);
-      const index = applyPalette(data, framePalette, format);
-      // passing a palette on a frame writes a colour table. with the global one
-      // we only need that on frame 0, per-frame palettes write one every time
-      const opts = { delay: delayMs, transparent, transparentIndex: 0 };
-      if (!palette || i === 0) opts.palette = framePalette;
-      gif.writeFrame(index, rect.w, rect.h, opts);
-      setCapProgress(p2start + (i + 1) / frames * p2span);
-      await yield_();
+    setCapProgress(p2start, isApng ? 'Encoding APNG…' : 'Encoding GIF…');
+
+    let blob, ext;
+    if (isApng) {
+      // APNG stores full 32-bit RGBA per frame, so no palette pass and no
+      // colour-count cap the way GIF has. cnum=0 tells UPNG to stay truecolour
+      const rgbaFrames = [];
+      for (let i = 0; i < frames; i++) {
+        renderFrame(i);
+        const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        rgbaFrames.push(data.buffer);
+        setCapProgress(p2start + (i + 1) / frames * p2span);
+        await yield_();
+      }
+      setCapProgress(0.98, 'Finishing…');
+      const bytes = UPNG.encode(rgbaFrames, rect.w, rect.h, 0, rgbaFrames.map(() => delayMs));
+      blob = new Blob([bytes], { type: 'image/apng' });
+      ext = 'apng';
+    } else {
+      const gif = GIFEncoder();
+      const qOpts = transparent ? { format, oneBitAlpha: true } : { format };
+      for (let i = 0; i < frames; i++) {
+        renderFrame(i);
+        const data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
+        // shared global palette if optimize is on, otherwise a fresh one each frame
+        const framePalette = palette || quantize(data, 256, qOpts);
+        const index = applyPalette(data, framePalette, format);
+        // passing a palette on a frame writes a colour table. with the global one
+        // we only need that on frame 0, per-frame palettes write one every time
+        const opts = { delay: delayMs, transparent, transparentIndex: 0 };
+        if (!palette || i === 0) opts.palette = framePalette;
+        gif.writeFrame(index, rect.w, rect.h, opts);
+        setCapProgress(p2start + (i + 1) / frames * p2span);
+        await yield_();
+      }
+      setCapProgress(0.98, 'Finishing…');
+      gif.finish();
+      blob = new Blob([gif.bytes()], { type: 'image/gif' });
+      ext = 'gif';
     }
 
-    setCapProgress(0.98, 'Finishing…');
-    gif.finish();
-    const blob = new Blob([gif.bytes()], { type: 'image/gif' });
     setCapProgress(1);
-    downloadBlob(blob, `${currentName}-spin.gif`);
-    status(`GIF saved · ${rect.w}\u00d7${rect.h} · ${Math.round(blob.size / 1024)} KB`, 'ok');
+    downloadBlob(blob, `${currentName}-spin.${ext}`);
+    status(`${ext.toUpperCase()} saved · ${rect.w}\u00d7${rect.h} · ${Math.round(blob.size / 1024)} KB`, 'ok');
   } catch (err) {
     status(`Recording failed: ${err.message}`, 'error');
   } finally {
@@ -1136,7 +1159,7 @@ const lightSettings = {
   spins: false,
   // simple mode just tints and dims the stock rig
   simpleColour: '#ffffff',
-  simpleBrightness: 3,
+  simpleBrightness: 3.00,
 };
 
 // the stock rig's original intensities, so simple mode can scale from them
@@ -1308,6 +1331,12 @@ bindSeg('smoothSeg', (btn) => { smoothIdx = Number(btn.dataset.i); applyPresets(
 bindSeg('sizeSeg', (btn) => { settings.size = Number(btn.dataset.size); syncReadouts(); });
 bindSeg('bgSeg', (btn) => { settings.transparent = btn.dataset.bg === '1'; });
 bindSeg('optSeg', (btn) => { settings.optimize = btn.dataset.opt === '1'; });
+bindSeg('formatSeg', (btn) => {
+  settings.format = btn.dataset.format;
+  // the palette-vs-truecolour choice only means anything for GIF; APNG is always truecolour
+  el('optCtl').style.display = settings.format === 'apng' ? 'none' : '';
+});
+el('optCtl').style.display = settings.format === 'apng' ? 'none' : '';
 
 el('previewBtn').addEventListener('click', () => {
   if (!currentModel) return status('Load a model first.', 'error');
