@@ -290,6 +290,16 @@
   }
   .readout .val { color: var(--text); }
 
+  .more-divider {
+    display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .more-divider .line { flex: 1; height: 1px; background: var(--accent); }
+  .more-settings { display: grid; gap: 13px; }
+  .more-settings[hidden] { display: none; }
+
   .pactions { display: flex; gap: 8px; }
   #previewBtn { flex: 1; }
   #previewBtn.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
@@ -454,10 +464,6 @@
         <input id="roll" type="range" min="-45" max="45" step="1" value="0" />
       </div>
       <div class="ctl">
-        <div class="lbl"><span>Model scale</span><span class="val" id="scaleVal">1.00x</span></div>
-        <input id="scale" type="range" min="0.2" max="3" step="0.05" value="1" />
-      </div>
-      <div class="ctl">
         <div class="lbl"><span>Bob amplitude</span><span class="val" id="bobAmpVal">0.00</span></div>
         <input id="bobAmp" type="range" min="0" max="0.6" step="0.01" value="0" />
       </div>
@@ -474,18 +480,29 @@
           <button data-size="1080">1080</button>
         </div>
       </div>
-      <div class="ctl">
-        <div class="lbl"><span>Background</span></div>
-        <div class="seg" id="bgSeg">
-          <button data-bg="1" class="on">Transparent</button>
-          <button data-bg="0">Solid</button>
-        </div>
+      <div class="more-divider" id="moreToggle">
+        <span class="line"></span>
+        <span id="moreToggleLabel">More settings...</span>
+        <span class="line"></span>
       </div>
-      <div class="ctl">
-        <div class="lbl"><span>Optimize filesize</span></div>
-        <div class="seg" id="optSeg">
-          <button data-opt="1" class="on">On</button>
-          <button data-opt="0">Off</button>
+      <div class="more-settings" id="moreSettings" hidden>
+        <div class="ctl">
+          <div class="lbl"><span>Background</span></div>
+          <div class="seg" id="bgSeg">
+            <button data-bg="1" class="on">Transparent</button>
+            <button data-bg="0">Solid</button>
+          </div>
+        </div>
+        <div class="ctl">
+          <div class="lbl"><span>Model scale</span><span class="val" id="scaleVal">1.00x</span></div>
+          <input id="scale" type="range" min="0.2" max="3" step="0.05" value="1" />
+        </div>
+        <div class="ctl">
+          <div class="lbl"><span>Optimize filesize</span></div>
+          <div class="seg" id="optSeg">
+            <button data-opt="1" class="on">On</button>
+            <button data-opt="0">Off</button>
+          </div>
         </div>
       </div>
       <div class="readout">

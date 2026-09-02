@@ -1320,6 +1320,12 @@ el('previewBtn').addEventListener('click', () => {
 
 el('recordBtn').addEventListener('click', recordGif);
 
+el('moreToggle').addEventListener('click', () => {
+  const box = el('moreSettings');
+  box.hidden = !box.hidden;
+  el('moreToggleLabel').textContent = box.hidden ? 'More settings...' : 'Less settings...';
+});
+
 el('panelToggle').addEventListener('click', () => {
   const collapsed = el('panel').classList.toggle('collapsed');
   el('panelToggle').textContent = collapsed ? '+' : '\u2013';
