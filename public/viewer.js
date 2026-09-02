@@ -1023,6 +1023,21 @@ function compositeOverBackground(fg, bg) {
   return out;
 }
 
+// webpxmux wants each pixel as a uint32 shaped like the hex literal 0xRRGGBBAA
+// (red in the highest byte, alpha in the lowest) - NOT the little-endian
+// in-memory byte order of an RGBA8 buffer, which is what a plain
+// `new Uint32Array(bytes.buffer)` reinterpretation would give. getting this
+// backwards is exactly what turns black (alpha read from the red byte) invisible
+// and tints every opaque pixel red (its real alpha ends up in the red channel)
+function packRGBAForWebp(bytes) {
+  const n = bytes.length >> 2;
+  const out = new Uint32Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    out[i] = ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0;
+  }
+  return out;
+}
+
 const ALPHA_THRESHOLD = 8;  // matches where the GIF's 1-bit alpha cuts off
 const CROP_PAD = 1;         // leave a hair of margin around the content
 
@@ -1181,16 +1196,13 @@ async function recordGif() {
       ext = 'png';
       label = 'APNG';
     } else if (isWebp) {
-      // same truecolour deal as APNG: no palette pass, full RGBA per frame.
-      // webpxmux's rgba field is a Uint32Array using the same little-endian
-      // R|G<<8|B<<16|A<<24 packing the bbox scan above already reads, so the
-      // cropped/composited bytes can be reinterpreted with no copying
+      // same truecolour deal as APNG: no palette pass, full RGBA per frame
       const wFrames = [];
       for (let i = 0; i < frames; i++) {
         renderFrame(i);
         let data = cropRGBA(readCanvasRGBA(renderer.domElement).data, size, rect);
         if (bgImage) data = compositeOverBackground(data, bgPixels);
-        wFrames.push({ duration: delayMs, isKeyframe: true, rgba: new Uint32Array(data.buffer) });
+        wFrames.push({ duration: delayMs, isKeyframe: true, rgba: packRGBAForWebp(data) });
         setCapProgress(p2start + (i + 1) / frames * p2span);
         await yield_();
       }
