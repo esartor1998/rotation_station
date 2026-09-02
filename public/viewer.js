@@ -21,7 +21,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
-// default lighting — swapped out for the custom rig in expert mode
+// default lighting, swapped out for the custom rig in expert mode
 const defaultLightGroup = new THREE.Group();
 scene.add(defaultLightGroup);
 
@@ -52,7 +52,7 @@ scene.add(pivot);
 
 // fallback for meshes that show up with no material at all
 const defaultMaterial = new THREE.MeshStandardMaterial({
-  color: 0x9aa4b2, metalness: 0.05, roughness: 0.75, side: THREE.DoubleSide,
+  color: 0x9aa4b2, metalness: 0, roughness: 1, side: THREE.DoubleSide,
 });
 
 let currentModel = null;   // the centred/scaled group sitting in the pivot
@@ -273,7 +273,7 @@ function finishGeometry(geo, name, preferVertexColors) {
   const hasColor = preferVertexColors && !!geo.getAttribute('color');
   const mat = new THREE.MeshStandardMaterial({
     color: hasColor ? 0xffffff : 0x9aa4b2, vertexColors: hasColor,
-    metalness: 0.05, roughness: 0.8, side: THREE.DoubleSide,
+    metalness: 0, roughness: 1, side: THREE.DoubleSide,
   });
   const group = new THREE.Group();
   group.add(new THREE.Mesh(geo, mat));
@@ -340,6 +340,7 @@ function installModel(object, name, materialInfo = {}) {
       }
       mat.side = THREE.DoubleSide;                 // nicer for previewing
       if (mat.map) mat.map.colorSpace = THREE.SRGBColorSpace; // keeps texture colours correct
+      makeMatteIfUnspecified(mat);
       mat.needsUpdate = true;
     });
 
@@ -377,6 +378,37 @@ function installModel(object, name, materialInfo = {}) {
 // OBJLoader hands meshes with no matched material a nameless MeshPhongMaterial
 function isBlankObjMaterial(mat) {
   return mat && mat.isMeshPhongMaterial && (mat.name === '' || mat.name == null);
+}
+
+// three's MeshPhongMaterial defaults to shininess 30 with a grey specular, and
+// the loaders only overwrite those when the source file actually declares them
+// so a model that says nothing about reflectivity arrives looking like wet
+// plastic. we can spot that case: an untouched material still holds the exact
+// defaults, so if we see them we assume nothing was specified and go matte
+const PHONG_DEFAULT_SHININESS = 30;
+const PHONG_DEFAULT_SPECULAR = 0x111111;
+
+function makeMatteIfUnspecified(mat) {
+  if (!mat) return;
+  if (mat.isMeshPhongMaterial) {
+    const untouchedShine = mat.shininess === PHONG_DEFAULT_SHININESS;
+    const untouchedSpec = mat.specular && mat.specular.getHex() === PHONG_DEFAULT_SPECULAR;
+    if (untouchedShine && untouchedSpec && !mat.specularMap) {
+      mat.shininess = 0;
+      mat.specular.setHex(0x000000);
+      mat.needsUpdate = true;
+    }
+    return;
+  }
+  // glTF and friends give us PBR materials. a fully default one (roughness 1,
+  // metalness 0) is already matte, so only the metalness needs flattening when
+  // no metalnessMap or roughnessMap came along to justify it
+  if (mat.isMeshStandardMaterial) {
+    if (mat.metalness > 0 && !mat.metalnessMap && !mat.roughnessMap && mat.roughness === 1) {
+      mat.metalness = 0;
+      mat.needsUpdate = true;
+    }
+  }
 }
 
 function disposeTree(root) {
@@ -1001,14 +1033,26 @@ function syncReadouts() {
 // lighting rig
 // ---------------------------------------------------------------------------
 const lightSettings = {
+  advanced: false,
   count: 2,
   type: 'directional',
   distance: 5,
   orbit: 45,
   elevation: 20,
+  spread: 360,
   colour: '#ffffff',
+  hueSpin: 0,
   brightness: 1.6,
+  ambient: 0.15,
+  spins: false,
+  // simple mode just tints and dims the stock rig
+  simpleColour: '#ffffff',
+  simpleBrightness: 1,
 };
+
+// the stock rig's original intensities, so simple mode can scale from them
+const BASE_HEMI = 1.1, BASE_KEY = 1.6, BASE_FILL = 0.5;
+const BASE_FILL_COLOUR = 0xbfd4ff;
 
 function updateLightRig() {
   while (customLightGroup.children.length) {
@@ -1016,38 +1060,73 @@ function updateLightRig() {
   }
 
   const expert = el('panel').classList.contains('advanced');
-  if (!expert) {
+  el('lightPanel').style.display = expert ? 'block' : 'none';
+  el('lightPanel').classList.toggle('advanced', lightSettings.advanced);
+
+  // outside expert mode, or with advanced lighting off, we stay on the stock
+  // rig. simple mode only recolours and rescales it, so the look people are
+  // used to survives
+  if (!expert || !lightSettings.advanced) {
     defaultLightGroup.visible = true;
     customLightGroup.visible = false;
-    el('lightPanel').style.display = 'none';
+
+    const tint = new THREE.Color(lightSettings.simpleColour);
+    const b = lightSettings.simpleBrightness;
+    hemi.color.copy(tint);
+    hemi.intensity = BASE_HEMI * b;
+    key.color.copy(tint);
+    key.intensity = BASE_KEY * b;
+    // the fill keeps its cool cast, tinted toward whatever colour was picked
+    fill.color.copy(new THREE.Color(BASE_FILL_COLOUR).multiply(tint));
+    fill.intensity = BASE_FILL * b;
     return;
   }
 
   defaultLightGroup.visible = false;
   customLightGroup.visible = true;
-  el('lightPanel').style.display = 'block';
 
-  const { count, type, distance, orbit, elevation, colour, brightness } = lightSettings;
-  const c = new THREE.Color(colour);
+  const {
+    count, type, distance, orbit, elevation, spread,
+    colour, hueSpin, brightness, ambient,
+  } = lightSettings;
+
+  const base = new THREE.Color(colour);
   const orbitRad = THREE.MathUtils.degToRad(orbit);
   const elevRad = THREE.MathUtils.degToRad(elevation);
+  const spreadRad = THREE.MathUtils.degToRad(spread);
+
+  if (ambient > 0) customLightGroup.add(new THREE.AmbientLight(base, ambient));
+
+  // splitting one budget across the lights keeps overall exposure steady as the
+  // count goes up, otherwise 30 lights just blows the model out
+  const per = brightness / Math.sqrt(count);
 
   for (let i = 0; i < count; i++) {
-    const angle = orbitRad + (i / count) * Math.PI * 2;
+    // a full 360 spread wraps evenly, anything narrower fans out from the orbit
+    const t = count === 1 ? 0 : i / (spread >= 360 ? count : count - 1);
+    const angle = orbitRad + t * spreadRad;
     const cosElev = Math.cos(elevRad);
     const x = Math.cos(angle) * cosElev;
     const z = Math.sin(angle) * cosElev;
     const y = Math.sin(elevRad);
 
+    // colour spin walks the hue across the rig, 0 leaves every light alike
+    const c = base.clone();
+    if (hueSpin > 0) {
+      const hsl = {};
+      c.getHSL(hsl);
+      c.setHSL((hsl.h + (hueSpin / 360) * (i / count)) % 1, hsl.s, hsl.l);
+    }
+
     let light;
     if (type === 'directional') {
-      light = new THREE.DirectionalLight(c, brightness);
+      light = new THREE.DirectionalLight(c, per);
       light.position.set(x, y, z);
     } else if (type === 'point') {
-      light = new THREE.PointLight(c, brightness, distance * 3, 1);
+      light = new THREE.PointLight(c, per * distance * distance * 0.15, distance * 4, 2);
       light.position.set(x * distance, y * distance, z * distance);
     } else if (type === 'spot') {
-      light = new THREE.SpotLight(c, brightness, distance * 3, Math.PI / 4, 0.5, 1);
+      light = new THREE.SpotLight(c, per * distance * distance * 0.15, distance * 4, Math.PI / 4, 0.5, 2);
       light.position.set(x * distance, y * distance, z * distance);
       light.target.position.set(0, 0, 0);
       customLightGroup.add(light.target);
@@ -1056,11 +1135,27 @@ function updateLightRig() {
   }
 }
 
+// with "spins" on we hang the rig off the pivot, so the lights turn with the
+// model and the shading stays put on its surface. fixed keeps them in the scene,
+// so the model rotates through the light instead
+function applyRigSpin() {
+  const wantParent = (lightSettings.advanced && lightSettings.spins) ? pivot : scene;
+  if (customLightGroup.parent !== wantParent) {
+    customLightGroup.parent?.remove(customLightGroup);
+    wantParent.add(customLightGroup);
+  }
+}
+
 function syncLightReadouts() {
+  el('lightCountVal').textContent = lightSettings.count;
   el('distVal').textContent = lightSettings.distance;
   el('orbitVal').textContent = lightSettings.orbit + '\u00b0';
   el('elevVal').textContent = lightSettings.elevation + '\u00b0';
+  el('spreadVal').textContent = lightSettings.spread + '\u00b0';
+  el('hueSpinVal').textContent = lightSettings.hueSpin + '\u00b0';
   el('brightVal').textContent = lightSettings.brightness.toFixed(1);
+  el('ambientVal').textContent = lightSettings.ambient.toFixed(2);
+  el('simpleBrightVal').textContent = lightSettings.simpleBrightness.toFixed(2);
   el('distanceCtl').style.display = lightSettings.type === 'directional' ? 'none' : '';
 }
 
@@ -1154,8 +1249,16 @@ el('advToggle').addEventListener('click', () => {
 applyPresets(); // set frames/fps from the default speed + smoothness presets
 
 // --- light panel controls ---
-bindSeg('lightCountSeg', (btn) => { lightSettings.count = Number(btn.dataset.n); updateLightRig(); });
 bindSeg('lightTypeSeg', (btn) => { lightSettings.type = btn.dataset.type; syncLightReadouts(); updateLightRig(); });
+bindSeg('lightSpinSeg', (btn) => { lightSettings.spins = btn.dataset.spin === '1'; applyRigSpin(); });
+
+el('advLightToggle').addEventListener('click', () => {
+  lightSettings.advanced = !lightSettings.advanced;
+  el('advLightToggle').classList.toggle('on', lightSettings.advanced);
+  syncLightReadouts();
+  updateLightRig();
+  applyRigSpin();
+});
 
 function bindLightRange(id, key) {
   const input = el(id);
@@ -1169,6 +1272,16 @@ bindLightRange('distance', 'distance');
 bindLightRange('orbit', 'orbit');
 bindLightRange('elevation', 'elevation');
 bindLightRange('brightness', 'brightness');
+bindLightRange('lightCount', 'count');
+bindLightRange('spread', 'spread');
+bindLightRange('hueSpin', 'hueSpin');
+bindLightRange('ambient', 'ambient');
+bindLightRange('simpleBrightness', 'simpleBrightness');
+
+el('simpleColour').addEventListener('input', () => {
+  lightSettings.simpleColour = el('simpleColour').value;
+  updateLightRig();
+});
 
 el('lightColour').addEventListener('input', () => {
   lightSettings.colour = el('lightColour').value;

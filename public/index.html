@@ -304,6 +304,11 @@
   #lightPanel .phead b { color: var(--accent); font-weight: 600; }
   #lightPanel .pbody { padding: 12px 13px 14px; display: grid; gap: 13px; }
   #lightPanel.collapsed .pbody { display: none; }
+
+  /* simple controls normally, the full rig once advanced lighting is on */
+  #lightPanel .adv-light { display: none; }
+  #lightPanel.advanced .simple-light { display: none; }
+  #lightPanel.advanced .adv-light { display: grid; }
   #lightPanelToggle {
     background: none; border: none; padding: 0; margin: 0;
     color: var(--muted); font-family: var(--mono); font-size: 15px; cursor: pointer;
@@ -462,19 +467,26 @@
   <div id="lightPanel">
     <div class="phead">
       <span>LIGHT&nbsp;<b>RIG</b></span>
-      <button id="lightPanelToggle">–</button>
+      <span class="phead-actions">
+        <button id="advLightToggle" class="advbtn" title="Enable advanced lighting">Adv</button>
+        <button id="lightPanelToggle">–</button>
+      </span>
     </div>
     <div class="pbody">
-      <div class="ctl">
-        <div class="lbl"><span>Active lights</span></div>
-        <div class="seg" id="lightCountSeg">
-          <button data-n="1">1</button>
-          <button data-n="2" class="on">2</button>
-          <button data-n="3">3</button>
-          <button data-n="4">4</button>
-        </div>
+      <div class="ctl simple-light">
+        <div class="lbl"><span>Colour</span></div>
+        <input id="simpleColour" type="color" value="#ffffff" />
       </div>
-      <div class="ctl">
+      <div class="ctl simple-light">
+        <div class="lbl"><span>Brightness</span><span class="val" id="simpleBrightVal">1.0</span></div>
+        <input id="simpleBrightness" type="range" min="0" max="3" step="0.05" value="1" />
+      </div>
+
+      <div class="ctl adv-light">
+        <div class="lbl"><span>Active lights</span><span class="val" id="lightCountVal">2</span></div>
+        <input id="lightCount" type="range" min="1" max="30" step="1" value="2" />
+      </div>
+      <div class="ctl adv-light">
         <div class="lbl"><span>Type</span></div>
         <div class="seg" id="lightTypeSeg">
           <button data-type="directional" class="on">Directional</button>
@@ -482,25 +494,44 @@
           <button data-type="spot">Spot</button>
         </div>
       </div>
-      <div class="ctl" id="distanceCtl" style="display:none">
+      <div class="ctl adv-light" id="distanceCtl" style="display:none">
         <div class="lbl"><span>Distance (harshness)</span><span class="val" id="distVal">5</span></div>
         <input id="distance" type="range" min="1" max="15" step="0.5" value="5" />
       </div>
-      <div class="ctl">
+      <div class="ctl adv-light">
         <div class="lbl"><span>Orbit</span><span class="val" id="orbitVal">45°</span></div>
         <input id="orbit" type="range" min="0" max="360" step="1" value="45" />
       </div>
-      <div class="ctl">
+      <div class="ctl adv-light">
         <div class="lbl"><span>Elevation</span><span class="val" id="elevVal">20°</span></div>
         <input id="elevation" type="range" min="-90" max="90" step="1" value="20" />
       </div>
-      <div class="ctl">
+      <div class="ctl adv-light">
+        <div class="lbl"><span>Spread</span><span class="val" id="spreadVal">360°</span></div>
+        <input id="spread" type="range" min="0" max="360" step="1" value="360" />
+      </div>
+      <div class="ctl adv-light">
         <div class="lbl"><span>Colour</span></div>
         <input id="lightColour" type="color" value="#ffffff" />
       </div>
-      <div class="ctl">
+      <div class="ctl adv-light">
+        <div class="lbl"><span>Colour spin</span><span class="val" id="hueSpinVal">0°</span></div>
+        <input id="hueSpin" type="range" min="0" max="360" step="1" value="0" />
+      </div>
+      <div class="ctl adv-light">
         <div class="lbl"><span>Brightness</span><span class="val" id="brightVal">1.6</span></div>
         <input id="brightness" type="range" min="0" max="5" step="0.1" value="1.6" />
+      </div>
+      <div class="ctl adv-light">
+        <div class="lbl"><span>Ambient fill</span><span class="val" id="ambientVal">0.15</span></div>
+        <input id="ambient" type="range" min="0" max="2" step="0.05" value="0.15" />
+      </div>
+      <div class="ctl adv-light">
+        <div class="lbl"><span>Rig follows model</span></div>
+        <div class="seg" id="lightSpinSeg">
+          <button data-spin="0" class="on">Fixed</button>
+          <button data-spin="1">Spins</button>
+        </div>
       </div>
     </div>
   </div>
