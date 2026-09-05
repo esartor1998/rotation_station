@@ -67,6 +67,10 @@ const defaultMaterial = new THREE.MeshStandardMaterial({
 
 let currentModel = null;   // the centred/scaled group sitting in the pivot
 let modelBaseScale = 1;    // the autofit factor for the current model, before the scale slider
+let currentAnimations = [];  // AnimationClip[] found in the loaded file, empty for most formats
+let mixer = null;            // THREE.AnimationMixer bound to the raw loaded object, or null
+let activeAction = null;     // the currently playing AnimationAction, or null for "None"
+let activeClipIndex = -1;    // index into currentAnimations, -1 means "None"
 let currentName = 'model'; // name of the loaded model, used for the gif filename
 let baseDistance = 5;      // the camera Z that framed the model at zoom 1
 let activeBlobUrls = [];   // blob URLs for uploaded textures, revoked on reload
@@ -78,7 +82,12 @@ let loadGeneration = 0;    // bumped each load, so a stale async callback can be
 // the loop length exact, and staying at 3cs or more dodges the browser clamp
 // that bumps tiny GIF delays up toward 100ms. that clamp is what used to make
 // "smoother" come out slower
-const settings = { frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480, bg: 'transparent', optimize: true, sampleFraction: 0.2, bobAmp: 0, bobCycles: 1, format: 'gif' };
+const settings = {
+  frames: 63, delayCs: 4, fps: 25, pitch: 20, roll: 0, scale: 1, size: 480,
+  bg: 'transparent', optimize: true, sampleFraction: 0.2, bobAmp: 0, bobCycles: 1, format: 'gif',
+  animSpeed: 1, animFit: 'stretch', // 'stretch' warps the clip to the chosen rotation length,
+                                     // 'snap' warps the rotation length to the clip instead
+};
 
 // "rotation speed" sets how long one full turn takes, "smoothness" sets the
 // per-frame delay. the frame count is then round(turnSec / delay), so a
@@ -270,7 +279,7 @@ async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }
     if (ext === 'dae') {
       const { ColladaLoader } = await import('three/addons/loaders/ColladaLoader.js');
       const result = new ColladaLoader(manager).parse(text(), texBase);
-      return finishScene(result && result.scene, name);
+      return finishScene(result && result.scene, name, result && result.animations);
     }
     if (ext === 'gltf' || ext === 'glb') {
       const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
@@ -278,13 +287,14 @@ async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }
       const data = ext === 'glb' ? toArrayBuffer(bytes) : text();
       return await new Promise((resolve) => {
         loader.parse(data, texBase,
-          (gltf) => { finishScene(gltf.scene, name); resolve(); },
+          (gltf) => { finishScene(gltf.scene, name, gltf.animations); resolve(); },
           (err) => { status(`Parse failed: ${err.message || err}`, 'error'); resolve(); });
       });
     }
     if (ext === 'fbx') {
       const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js');
-      return finishScene(new FBXLoader(manager).parse(toArrayBuffer(bytes), texBase), name);
+      const object = new FBXLoader(manager).parse(toArrayBuffer(bytes), texBase);
+      return finishScene(object, name, object && object.animations);
     }
     if (ext === 'stl') {
       const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
@@ -301,12 +311,12 @@ async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }
 }
 
 // for loaders that hand back a scene or group (Collada, glTF, FBX)
-function finishScene(scene, name) {
+function finishScene(scene, name, animations) {
   if (!scene) return status('No geometry found in that file.', 'error');
   let hasMesh = false;
   scene.traverse((c) => { if (c.isMesh) hasMesh = true; });
   if (!hasMesh) return status('No geometry found in that file.', 'error');
-  installModel(scene, name, {});
+  installModel(scene, name, {}, animations);
 }
 
 // for loaders that hand back bare geometry (STL, PLY), so wrap it in a mesh
@@ -394,11 +404,15 @@ function applyAlphaTransparencyFix(root) {
   });
 }
 
-function installModel(object, name, materialInfo = {}) {
+function installModel(object, name, materialInfo = {}, animations = []) {
   if (currentModel) {
     pivot.remove(currentModel);
     disposeTree(currentModel);
   }
+  mixer?.stopAllAction();
+  mixer = null;
+  activeAction = null;
+  activeClipIndex = -1;
 
   let triangles = 0;
   object.traverse((child) => {
@@ -441,6 +455,18 @@ function installModel(object, name, materialInfo = {}) {
   currentModel = container;
   currentName = (name || 'model').replace(/\.[^.]+$/, '');
   pivot.add(container);
+
+  // animation clips ride on the raw loaded object, not the centring/scaling
+  // wrapper above - AnimationMixer binds tracks by node name inside that
+  // hierarchy, so the extra wrapper groups don't affect it either way
+  currentAnimations = animations || [];
+  populateClipPanel();
+  if (currentAnimations.length) {
+    mixer = new THREE.AnimationMixer(object);
+    selectClip(0);
+  } else {
+    selectClip(-1);
+  }
 
   resetView();
 
@@ -919,6 +945,96 @@ function applyOrientation(p) {
   // number of sine periods over p in [0,1) or the GIF's loop would jump
   pivot.position.x = panX;
   pivot.position.y = panY + settings.bobAmp * Math.sin(p * Math.PI * 2 * settings.bobCycles);
+
+  updateAnimation(p);
+}
+
+// scrubs the active clip to an absolute time for phase p, in [0,1) over one
+// full turntable rotation. setting action.time directly and calling
+// mixer.update(0) (rather than mixer.update(delta)) makes this idempotent -
+// rendering the same p twice, as GIF capture's two passes do, gives identical
+// results, and there's no drift to accumulate across calls
+function updateAnimation(p) {
+  if (!mixer || !activeAction) return;
+  const dur = activeAction.getClip().duration;
+  let clipPhase;
+  if (settings.animFit === 'snap') {
+    // rotation length was already set to match the clip (see applyAnimFit),
+    // so one rotation is exactly one clip cycle - no further scaling needed
+    clipPhase = p;
+  } else {
+    // rotation length is whatever Speed/Smoothness picked, independent of the
+    // clip, so the clip gets timescaled to fit. seamless only when the result
+    // lands on a whole number of cycles - that trade-off is what "stretch"
+    // buys you over "snap": free rotation timing, at the cost of a possible
+    // pop at the loop point
+    const rotationSec = (settings.frames * settings.delayCs) / 100;
+    const cyclesPerRotation = (rotationSec * settings.animSpeed) / dur;
+    clipPhase = (p * cyclesPerRotation) % 1;
+  }
+  activeAction.time = clipPhase * dur;
+  mixer.update(0);
+}
+
+// when "snap rotation to clip" is active, the loop length comes from the
+// clip's own duration (and the speed slider) rather than the Speed preset -
+// same clamp and formula as applyPresets(), just fed a different turnSec
+function applyAnimFit() {
+  if (settings.animFit !== 'snap' || !activeAction) return;
+  const turnSec = activeAction.getClip().duration / settings.animSpeed;
+  settings.frames = Math.min(300, Math.max(8, Math.round((turnSec * 100) / settings.delayCs)));
+  settings.fps = Math.round(100 / settings.delayCs);
+  syncReadouts();
+}
+
+function updateAnimVisibility() {
+  const hasClip = activeClipIndex >= 0;
+  el('animSpeedCtl').style.display = hasClip ? '' : 'none';
+  el('animFitCtl').style.display = hasClip ? '' : 'none';
+  // snap mode derives the rotation length from the clip, so the preset that
+  // would otherwise pick it is misleading to leave visible
+  el('speedCtl').style.display = (hasClip && settings.animFit === 'snap') ? 'none' : '';
+}
+
+function syncClipListUI() {
+  for (const btn of el('clipList').children) {
+    btn.classList.toggle('on', Number(btn.dataset.clip) === activeClipIndex);
+  }
+}
+
+function selectClip(index) {
+  activeAction?.stop();
+  activeAction = null;
+  activeClipIndex = index;
+  if (mixer && index >= 0 && currentAnimations[index]) {
+    activeAction = mixer.clipAction(currentAnimations[index]);
+    activeAction.play();
+    applyAnimFit();
+  }
+  syncClipListUI();
+  updateAnimVisibility();
+  if (!spinning && currentModel) applyOrientation(phase); // repaint immediately, spinning or not
+}
+
+// builds the "None" + one-per-clip button list, and shows/hides the whole
+// panel - most imported models have no animations at all, so it stays gone
+// unless the file actually has some
+function populateClipPanel() {
+  const list = el('clipList');
+  list.innerHTML = '';
+  const makeBtn = (label, index) => {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    btn.dataset.clip = String(index);
+    list.appendChild(btn);
+  };
+  makeBtn('None', -1);
+  currentAnimations.forEach((clip, i) => makeBtn(clip.name || `Clip ${i + 1}`, i));
+  list.onclick = (e) => {
+    const btn = e.target.closest('button');
+    if (btn) selectClip(Number(btn.dataset.clip));
+  };
+  el('animPanel').classList.toggle('show', currentAnimations.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1461,7 +1577,11 @@ function bindSeg(segId, onPick) {
   });
 }
 bindSeg('speedSeg', (btn) => { speedIdx = Number(btn.dataset.i); applyPresets(); });
-bindSeg('smoothSeg', (btn) => { smoothIdx = Number(btn.dataset.i); applyPresets(); });
+// smoothness (delayCs) feeds the frame-count formula in both applyPresets and
+// applyAnimFit, so re-run whichever one currently owns the rotation length -
+// otherwise changing smoothness while "snap to clip" is active would silently
+// overwrite the clip-derived frame count with the (hidden, stale) speed preset
+bindSeg('smoothSeg', (btn) => { smoothIdx = Number(btn.dataset.i); applyPresets(); applyAnimFit(); });
 bindSeg('sizeSeg', (btn) => { settings.size = Number(btn.dataset.size); syncReadouts(); });
 bindSeg('bgSeg', (btn) => {
   settings.bg = btn.dataset.bg;
@@ -1538,6 +1658,25 @@ el('panelToggle').addEventListener('click', () => {
   if (!collapsed) maybeCollapseOther('gif');
 });
 
+el('animPanelToggle').addEventListener('click', () => {
+  const collapsed = el('animPanel').classList.toggle('collapsed');
+  el('animPanelToggle').textContent = collapsed ? '+' : '\u2013';
+});
+
+el('animSpeed').addEventListener('input', () => {
+  settings.animSpeed = Number(el('animSpeed').value);
+  el('animSpeedVal').textContent = settings.animSpeed.toFixed(2) + 'x';
+  applyAnimFit();
+  if (!spinning && currentModel) applyOrientation(phase);
+});
+
+bindSeg('animFitSeg', (btn) => {
+  settings.animFit = btn.dataset.fit;
+  applyAnimFit();
+  updateAnimVisibility();
+  if (!spinning && currentModel) applyOrientation(phase);
+});
+
 el('advToggle').addEventListener('click', () => {
   const adv = el('panel').classList.toggle('advanced');
   el('advToggle').classList.toggle('on', adv);
@@ -1547,6 +1686,7 @@ el('advToggle').addEventListener('click', () => {
     syncReadouts();
   } else {
     applyPresets();
+    applyAnimFit(); // re-derive the frame count from the clip if "snap to clip" is active
   }
   updateOptVisibility();
 });

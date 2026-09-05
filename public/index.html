@@ -354,7 +354,53 @@
   input[type="color"]::-webkit-color-swatch { border: 1px solid var(--line); border-radius: 5px; }
   input[type="color"]::-moz-color-swatch { border: 1px solid var(--line); border-radius: 5px; }
 
+  /* ---- the animation clip picker -------------------------------------------
+     top-left, starts collapsed, and only appears at all once a loaded model
+     actually has clips - most models don't, so it stays out of the way */
+  #animPanel {
+    position: fixed;
+    top: 62px; left: 14px;
+    z-index: 9;
+    width: 220px;
+    max-height: calc(100vh - 90px);
+    display: none;
+    background: rgba(22,25,30,.94);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    backdrop-filter: blur(8px);
+    overflow: hidden;
+  }
+  #animPanel.show { display: flex; flex-direction: column; }
+  #animPanel .phead {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 13px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--line);
+  }
+  #animPanel .phead b { color: var(--accent); font-weight: 600; }
+  #animPanel .pbody { padding: 12px 13px 14px; display: grid; gap: 13px; overflow-y: auto; }
+  #animPanel.collapsed .pbody { display: none; }
+  #animPanelToggle {
+    background: none; border: none; padding: 0; margin: 0;
+    color: var(--muted); font-family: var(--mono); font-size: 15px; cursor: pointer;
+  }
+
+  .cliplist { display: grid; gap: 4px; }
+  .cliplist button {
+    text-align: left; padding: 7px 10px; font-family: var(--mono); font-size: 12px;
+    background: var(--surface-2); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .cliplist button.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+
+  .hint {
+    font-family: var(--mono); font-size: 10px; line-height: 1.5; color: var(--muted);
+  }
+
   @media (max-width: 720px) {
+    #animPanel { width: auto; right: 14px; max-height: 40vh; }
     input[type="url"] { width: 40vw; }
     .brand { display: none; }
     #legend { display: none; }
@@ -430,6 +476,31 @@
     <div><kbd>scroll</kbd> zoom · <kbd>R</kbd> recenter · <kbd>G</kbd> grid</div>
   </div>
 
+  <div id="animPanel" class="collapsed">
+    <div class="phead">
+      <span>ANIM<b>ATION</b></span>
+      <button id="animPanelToggle" title="Expand">+</button>
+    </div>
+    <div class="pbody">
+      <div class="ctl">
+        <div class="lbl"><span>Clip</span></div>
+        <div class="cliplist" id="clipList"></div>
+      </div>
+      <div class="ctl" id="animSpeedCtl">
+        <div class="lbl"><span>Playback speed</span><span class="val" id="animSpeedVal">1.00x</span></div>
+        <input id="animSpeed" type="range" min="0.1" max="3" step="0.05" value="1" />
+      </div>
+      <div class="ctl" id="animFitCtl">
+        <div class="lbl"><span>Loop fit</span></div>
+        <div class="seg" id="animFitSeg">
+          <button data-fit="stretch" class="on">Stretch to rotation</button>
+          <button data-fit="snap">Snap rotation to clip</button>
+        </div>
+        <div class="hint">Snap always loops seamlessly. Stretch can pop at the loop point unless the speed lines up with a whole number of cycles.</div>
+      </div>
+    </div>
+  </div>
+
   <div id="panelStack">
   <div id="panel">
     <div class="phead">
@@ -440,7 +511,7 @@
       </span>
     </div>
     <div class="pbody">
-      <div class="ctl preset-ctl">
+      <div class="ctl preset-ctl" id="speedCtl">
         <div class="lbl"><span>Rotation speed</span></div>
         <div class="seg" id="speedSeg">
           <button data-i="0">Slow</button>
