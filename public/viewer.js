@@ -249,12 +249,12 @@ async function loadObjWithMaterials({ objText, objName, mtlResolver, manager }) 
 // the loaders are imported lazily through the CDN import map, so they cost
 // nothing until you actually open a model of that type
 // ---------------------------------------------------------------------------
-const SUPPORTED_RE = /\.(obj|dae|gltf|glb|stl|ply|fbx)$/i;
-const FORMAT_PRIORITY = ['obj', 'glb', 'gltf', 'fbx', 'dae', 'stl', 'ply'];
+const SUPPORTED_RE = /\.(obj|dae|gltf|glb|stl|ply|fbx|pmx|pmd)$/i;
+const FORMAT_PRIORITY = ['obj', 'glb', 'gltf', 'fbx', 'dae', 'pmx', 'pmd', 'stl', 'ply'];
 const extOf = (name) => (name.split('.').pop() || '').toLowerCase();
 const toArrayBuffer = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
 
-async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }) {
+async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '', selfUrl }) {
   const ext = extOf(name);
   const text = () => new TextDecoder('utf-8').decode(bytes);
 
@@ -295,6 +295,28 @@ async function dispatchModel({ name, bytes, manager, mtlResolver, texBase = '' }
       const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js');
       const object = new FBXLoader(manager).parse(toArrayBuffer(bytes), texBase);
       return finishScene(object, name, object && object.animations);
+    }
+    if (ext === 'pmx' || ext === 'pmd') {
+      // MMDLoader has no parse(bytes) entry point, only URL-based loading, and
+      // its own extension check (loader.load()) looks for a literal ".pmx"/
+      // ".pmd" in the URL string - which a blob: URL never has. so we call the
+      // raw parse step ourselves (picking pmx vs pmd from the real filename,
+      // not the loader's own sniffing) and then run the same mesh-building
+      // step .load() would have, via the loader's own public meshBuilder
+      const { MMDLoader } = await import('three/addons/loaders/MMDLoader.js');
+      const loader = new MMDLoader(manager);
+      const parseFn = ext === 'pmd' ? 'loadPMD' : 'loadPMX';
+      return await new Promise((resolve) => {
+        loader[parseFn](selfUrl, (data) => {
+          try {
+            const mesh = loader.meshBuilder.setCrossOrigin(loader.crossOrigin).build(data, texBase);
+            finishScene(mesh, name, mesh.animations);
+          } catch (err) {
+            status(`Parse failed: ${err.message || err}`, 'error');
+          }
+          resolve();
+        }, undefined, (err) => { status(`Parse failed: ${err.message || err}`, 'error'); resolve(); });
+      });
     }
     if (ext === 'stl') {
       const { STLLoader } = await import('three/addons/loaders/STLLoader.js');
@@ -574,10 +596,10 @@ const ZIP_MAX_INPUT = 150 * 1024 * 1024;        // refuse a zip file bigger than
 const ZIP_MAX_TOTAL = 300 * 1024 * 1024;        // cap on the total unpacked size
 const ZIP_MAX_FILE = 150 * 1024 * 1024;         // cap on any one unpacked file
 const ZIP_MAX_ENTRIES = 5000;
-const MODEL_FILE_RE = /\.(obj|mtl|dae|gltf|glb|stl|ply|fbx|bin|png|jpe?g|bmp|gif|webp|tga|dds|ktx2)$/i;
+const MODEL_FILE_RE = /\.(obj|mtl|dae|gltf|glb|stl|ply|fbx|pmx|pmd|bin|png|jpe?g|bmp|gif|webp|tga|dds|ktx2|sph|spa)$/i;
 // 3D formats we recognise but still can't open. only used so we can give a
 // useful message when a zip has models in it but nothing we handle
-const OTHER_MODEL_RE = /\.(blend|3ds|smd|pmx|pmd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x|usd[acz]?)$/i;
+const OTHER_MODEL_RE = /\.(blend|3ds|smd|md5mesh|max|c4d|nif|mdl|mesh|vmt|vtf|x|usd[acz]?)$/i;
 let lastOtherModels = []; // formats we can't open that turned up in the last archive
 
 function extractZip(file) {
@@ -666,7 +688,7 @@ async function loadFromFiles(fileList) {
     if (lastOtherModels.length) {
       return status(`Archive has no supported model (found ${lastOtherModels.join(', ')}).`, 'error');
     }
-    return status('No supported model file found (.obj, .dae, .gltf/.glb, .stl, .ply, .fbx).', 'error');
+    return status('No supported model file found (.obj, .dae, .gltf/.glb, .stl, .ply, .fbx, .pmx/.pmd).', 'error');
   }
 
   clearBlobUrls();
@@ -697,7 +719,8 @@ async function loadFromFiles(fileList) {
   };
 
   const bytes = new Uint8Array(await primary.arrayBuffer());
-  await dispatchModel({ name: primary.name, bytes, manager, mtlResolver, texBase: '' });
+  const selfUrl = urlByName.get(primary.name.toLowerCase());
+  await dispatchModel({ name: primary.name, bytes, manager, mtlResolver, texBase: '', selfUrl });
 }
 
 // ---------------------------------------------------------------------------
@@ -752,7 +775,10 @@ async function loadFromURL(rawUrl) {
 
     const mtlResolver = async (lib) => proxyText(new URL(lib, url).href);
 
-    await dispatchModel({ name: objName, bytes, manager, mtlResolver, texBase: url });
+    // MMDLoader fetches the model itself (rather than taking raw bytes like the
+    // other loaders), through this same manager - so it goes through the proxy
+    // and the same URL modifier above just like every texture reference does
+    await dispatchModel({ name: objName, bytes, manager, mtlResolver, texBase: url, selfUrl: url });
   } catch (err) {
     status(`Load failed: ${err.message}`, 'error');
   }
@@ -1790,7 +1816,7 @@ window.addEventListener('drop', (e) => {
     if (!files.length) files = plainFiles;
     const usable = files.some((f) => SUPPORTED_RE.test(f.name) || /\.zip$/i.test(f.name));
     if (usable) loadFromFiles(files);
-    else status('Drop a model (.obj/.dae/.gltf/.glb/.stl/.ply/.fbx), a .zip, or a folder', 'error');
+    else status('Drop a model (.obj/.dae/.gltf/.glb/.stl/.ply/.fbx/.pmx/.pmd), a .zip, or a folder', 'error');
   })();
 });
 
