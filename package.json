@@ -11,6 +11,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "undici": "^6.21.1"
   }
 }

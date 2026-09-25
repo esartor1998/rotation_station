@@ -4,6 +4,7 @@ import path from 'node:path';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -117,52 +118,81 @@ function isPrivateAddress(ip) {
   return true; // not an IP we recognise, so treat it as unsafe
 }
 
-// reject anything that isn't http(s), or that resolves to a private address
-async function assertSafeUrl(raw) {
+// reject anything that isn't http(s), or that resolves to a private address.
+// returns every resolved record (not just one), since a hostname with mixed
+// public/private A records has to be rejected as a whole
+async function resolveAndValidate(raw) {
   let url;
   try { url = new URL(raw); } catch { throw new Error('Invalid URL'); }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error('Only http/https URLs are allowed');
   }
   const host = url.hostname.replace(/^\[|\]$/g, ''); // unwrap IPv6 literals
-  let addresses;
+  let records;
   if (net.isIP(host)) {
-    addresses = [host];
+    records = [{ address: host, family: net.isIP(host) }];
   } else {
     try {
-      addresses = (await dns.lookup(host, { all: true })).map((r) => r.address);
+      records = await dns.lookup(host, { all: true });
     } catch {
       throw new Error('DNS resolution failed');
     }
   }
-  for (const addr of addresses) {
-    if (isPrivateAddress(addr)) throw new Error('Blocked private/internal address');
+  for (const r of records) {
+    if (isPrivateAddress(r.address)) throw new Error('Blocked private/internal address');
   }
-  return url;
+  return { url, records };
 }
 
-// follow redirects by hand so every hop gets re-checked. a public URL can 302
-// to an internal one, and automatic redirects would sail straight past the IP
-// check
+// DNS rebinding: checking a hostname's address and then separately fetching
+// that same hostname is a classic TOCTOU hole. an attacker's nameserver can
+// answer with a public IP the first time (so resolveAndValidate passes) and
+// something private the next time (a TTL of 0 is all that takes, and every
+// real DNS server supports it) - and plain fetch() would do exactly that
+// second, independent lookup on its own when it connects.
+//
+// so instead of handing fetch() the hostname and hoping it resolves to the
+// same thing we already checked, this pins undici's own connection lookup to
+// return only the address(es) resolveAndValidate already approved. no second
+// query ever happens, so there's nothing for a rebinding nameserver to answer
+// differently. TLS certificate/hostname validation is a separate mechanism
+// from address resolution and stays fully enforced regardless
+function pinnedLookup(records) {
+  return (_hostname, options, callback) => {
+    if (options.all) return callback(null, records);
+    const r = records[0];
+    callback(null, r.address, r.family);
+  };
+}
+
+// follow redirects by hand so every hop gets re-checked and re-pinned. a
+// public URL can 302 to an internal one, and automatic redirects would sail
+// straight past the IP check on the hop that actually matters
 async function safeFetch(startUrl) {
   let target = startUrl;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertSafeUrl(target);
+    const { records } = await resolveAndValidate(target);
+    const dispatcher = new Agent({ connect: { lookup: pinnedLookup(records) } });
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     let res;
     try {
-      res = await fetch(target, { redirect: 'manual', signal: controller.signal });
+      res = await undiciFetch(target, { redirect: 'manual', signal: controller.signal, dispatcher });
+    } catch (err) {
+      dispatcher.close().catch(() => {}); // fetch itself failed, so nobody downstream owns this dispatcher
+      throw err;
     } finally {
       clearTimeout(timer);
     }
     if ([301, 302, 303, 307, 308].includes(res.status)) {
       const loc = res.headers.get('location');
-      if (!loc) return res;
+      if (!loc) return { res, dispatcher };
+      try { await res.body?.cancel(); } catch {} // done with this hop's body, don't leave it dangling
+      dispatcher.close().catch(() => {});
       target = new URL(loc, target).href;
       continue;
     }
-    return res;
+    return { res, dispatcher }; // the caller streams the body, so it also owns closing this
   }
   throw new Error('Too many redirects');
 }
@@ -201,9 +231,12 @@ app.get('/proxy', async (req, res) => {
   inFlightPerIp.set(ip, perIp + 1);
   const started = Date.now();
   let reader = null;
+  let dispatcher = null;
 
   try {
-    const upstream = await safeFetch(target);
+    const fetched = await safeFetch(target);
+    const upstream = fetched.res;
+    dispatcher = fetched.dispatcher;
     if (!upstream.ok) {
       return res.status(upstream.status).send(`Upstream responded ${upstream.status}.`);
     }
@@ -243,6 +276,7 @@ app.get('/proxy', async (req, res) => {
     else res.destroy();
   } finally {
     try { reader && reader.cancel(); } catch {}
+    if (dispatcher) dispatcher.close().catch(() => {});
     inFlight = Math.max(0, inFlight - 1);
     const n = (inFlightPerIp.get(ip) || 1) - 1;
     if (n <= 0) inFlightPerIp.delete(ip); else inFlightPerIp.set(ip, n);
